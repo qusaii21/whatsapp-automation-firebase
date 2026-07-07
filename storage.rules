@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// Same note as firestore.rules: no auth provider in scope, so property photo
+// uploads from the CRM need open access. Restrict this with Firebase Auth
+// checks if this ever moves beyond an internal admin tool.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /property-photos/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

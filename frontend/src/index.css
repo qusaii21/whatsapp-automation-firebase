@@ -1,0 +1,286 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f6f7f9;
+  color: #1a1d21;
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: #1a1d21;
+  color: #fff;
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-title {
+  font-weight: 700;
+  font-size: 18px;
+  margin-bottom: 24px;
+  padding: 0 8px;
+}
+
+.sidebar-link {
+  color: #c7cbd1;
+  text-decoration: none;
+  padding: 10px 8px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.sidebar-link:hover {
+  background: #2a2e34;
+  color: #fff;
+}
+
+.sidebar-link.active {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.main-content {
+  flex: 1;
+  padding: 32px 40px;
+  overflow-x: auto;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.search-input {
+  padding: 8px 12px;
+  border: 1px solid #d5d8dc;
+  border-radius: 6px;
+  width: 260px;
+  font-size: 14px;
+}
+
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.pipeline-column {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.pipeline-column-title {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin: 0 0 12px 0;
+}
+
+.lead-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.lead-card-header {
+  width: 100%;
+  text-align: left;
+  background: #fff;
+  border: none;
+  padding: 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lead-card-header:hover {
+  background: #f9fafb;
+}
+
+.lead-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.lead-phone {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.lead-card-body {
+  border-top: 1px solid #e5e7eb;
+  padding: 12px;
+  background: #fafbfc;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.conversation-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-bubble {
+  max-width: 90%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.chat-bubble-user {
+  align-self: flex-start;
+  background: #eef2f7;
+}
+
+.chat-bubble-assistant {
+  align-self: flex-end;
+  background: #dbeafe;
+}
+
+.chat-bubble-role {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 2px;
+}
+
+.chat-bubble-time {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+.empty-note {
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.property-form {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 28px;
+}
+
+.property-form h2 {
+  margin-top: 0;
+  font-size: 16px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+
+.form-full-width {
+  grid-column: span 2;
+}
+
+.form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.form-grid input,
+.form-grid textarea {
+  padding: 8px 10px;
+  border: 1px solid #d5d8dc;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.form-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.secondary {
+  background: #fff;
+  border-color: #d5d8dc;
+  color: #374151;
+}
+
+button.danger {
+  background: #fff;
+  border-color: #fca5a5;
+  color: #dc2626;
+  margin-left: 6px;
+}
+
+.properties-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.properties-table th,
+.properties-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 13px;
+}
+
+.properties-table th {
+  background: #f9fafb;
+  color: #6b7280;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.property-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+}

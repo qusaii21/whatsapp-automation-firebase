@@ -1,0 +1,107 @@
+const { onRequest } = require("firebase-functions/v2/https");
+const logger = require("firebase-functions/logger");
+const admin = require("firebase-admin");
+
+const { WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID } = require("./config");
+const { sendWhatsAppText } = require("./whatsapp");
+
+/**
+ * HUMAN AGENT MODE — manual send endpoint.
+ *
+ * This is the ONLY function in the project meant to be called directly from
+ * the browser (every other function is a Meta/Cloud-Tasks webhook target).
+ * The CRM has no server layer of its own — it normally talks to Firestore
+ * straight from the client SDK — but sending a WhatsApp message requires the
+ * WHATSAPP_TOKEN secret, which must never reach the browser. So this thin
+ * endpoint exists purely to let a human agent's typed message reach the
+ * WhatsApp Cloud API, using the exact same `sendWhatsAppText` helper the AI
+ * pipeline already uses (see whatsapp.js) — no new send path, no duplicated
+ * Graph API logic.
+ *
+ * It writes the exact same turn SHAPE the AI pipeline writes
+ * (`{ role, text, timestamp }`, see processPhoneQueue.js's `assistantTurn`),
+ * plus `sentBy: "human"` so the CRM thread (ConversationThread.jsx already
+ * checks for this) can render it distinctly from an AI reply. Because it's
+ * appended to the SAME `conversationHistory` array the AI reads from, the
+ * moment a lead is switched back to AI mode, `runAgent` sees this message
+ * like any other past assistant turn (see agent.js's `historyToMessages`,
+ * which treats every non-"user" role as an AIMessage) — no separate merge
+ * step needed for the "AI continues seamlessly" requirement.
+ *
+ * Deliberately does NOT touch `leads/{phone}/opportunities/*` — the
+ * customer -> opportunities architecture is exclusively updated by the AI
+ * pipeline in processPhoneQueue.js, and this feature must not change that.
+ */
+const sendManualMessage = onRequest(
+  {
+    secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID],
+    region: "us-central1",
+    cors: true,
+  },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      res.sendStatus(405);
+      return;
+    }
+
+    try {
+      const { phone, text } = req.body || {};
+
+      if (!phone || typeof phone !== "string") {
+        res.status(400).json({ error: "Missing or invalid 'phone'" });
+        return;
+      }
+
+      const trimmedText = typeof text === "string" ? text.trim() : "";
+      if (!trimmedText) {
+        res.status(400).json({ error: "Missing or empty 'text'" });
+        return;
+      }
+
+      // Send first — if the WhatsApp Cloud API call fails, we don't want a
+      // message sitting in the CRM's history claiming it was delivered.
+      await sendWhatsAppText({
+        to: phone,
+        text: trimmedText,
+        whatsappToken: WHATSAPP_TOKEN.value(),
+        phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+      });
+
+      const db = admin.firestore();
+      const leadRef = db.collection("leads").doc(phone);
+
+      const turn = {
+        role: "agent",
+        text: trimmedText,
+        timestamp: Date.now(),
+        sentBy: "human",
+      };
+
+      const snap = await leadRef.get();
+      const updates = {
+        conversationHistory: admin.firestore.FieldValue.arrayUnion(turn),
+        lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      // Mirror the AI pipeline's own status bookkeeping (processPhoneQueue.js)
+      // so a manually-answered lead doesn't keep showing as "pending" — but
+      // never downgrade a lead that's already further along (e.g. qualified).
+      const currentStatus = snap.exists ? snap.data().status : null;
+      if (currentStatus !== "qualified" && currentStatus !== "visit_requested") {
+        updates.status = "replied";
+      }
+
+      await leadRef.set(updates, { merge: true });
+
+      logger.info("sendManualMessage: sent", { phone });
+      res.status(200).json({ ok: true, turn });
+    } catch (err) {
+      logger.error("sendManualMessage: failed", {
+        error: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ error: "Failed to send message" });
+    }
+  }
+);
+
+module.exports = { sendManualMessage };

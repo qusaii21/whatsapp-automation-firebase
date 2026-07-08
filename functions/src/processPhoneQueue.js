@@ -209,6 +209,40 @@ async function processOneMessage({ db, phone, messageId, item }) {
     }
     await leadRef.set(baseUpdates, { merge: true });
 
+    // --- HUMAN AGENT MODE -------------------------------------------------
+    // `lead.mode === "human"` means a human agent has taken over this
+    // conversation from the CRM (see sendManualMessage.js + the AI/Human
+    // toggle in CustomerPanel.jsx). The incoming message has ALREADY been
+    // synced into conversationHistory and lastMessageAt via baseUpdates just
+    // above, so the CRM thread stays fully live — but the AI must not run,
+    // must not call the LLM, and must not send anything back. We skip
+    // straight to marking this inbox item complete so the drain loop moves
+    // on to any next queued message for this phone without ever touching
+    // runAgent/sendWhatsAppText/opportunities below.
+    //
+    // Missing `mode` (every lead created before this feature shipped, or any
+    // lead that has never been toggled) is treated as "ai" — the default —
+    // so existing conversations keep working exactly as before.
+    if (lead.mode === "human") {
+      await msgRef.set(
+        {
+          status: "completed",
+          completed: true,
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          skippedForHumanMode: true,
+        },
+        { merge: true }
+      );
+      await itemRef.delete();
+      logger.info("processPhoneQueue: human mode active, AI reply skipped", {
+        conversationId: phone,
+        phone,
+        messageId,
+        processingState: "completed_human_mode",
+      });
+      return { stopDraining: false };
+    }
+
     const shownProperties = lead.shownProperties || [];
 
     // CUSTOMER -> OPPORTUNITIES: fetch once, up front, and reuse for both the

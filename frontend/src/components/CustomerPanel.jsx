@@ -175,6 +175,11 @@ export default function CustomerPanel({ lead, matchedProperty, onClose }) {
 
       <div className="panel-section">
         <div className="panel-section-title">AI context</div>
+        <ToggleField
+          label="AI replies automatically"
+          checked={lead.mode !== "human"}
+          onChange={(checked) => save("mode", checked ? "ai" : "human")}
+        />
         <div className="panel-field">
           <div className="panel-field-label">Current intent</div>
           <div className="panel-field-value" style={{ cursor: "default" }}>

@@ -1,15 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, doc, onSnapshot, orderBy, query, updateDoc } from "firebase/firestore";
 import { useSearchParams } from "react-router-dom";
-import { PanelRightOpen, PanelRightClose, ArrowLeft } from "lucide-react";
+import { PanelRightOpen, PanelRightClose, ArrowLeft, Bot, UserRound } from "lucide-react";
 import { db } from "../firebase.js";
 import ConversationList, { needsReply } from "../components/ConversationList.jsx";
 import ConversationThread from "../components/ConversationThread.jsx";
 import CustomerPanel from "../components/CustomerPanel.jsx";
+import MessageComposer from "../components/MessageComposer.jsx";
 import Avatar from "../components/Avatar.jsx";
 import ScoreRing from "../components/ScoreRing.jsx";
 import { scoreLead, scoreTier } from "../lib/leadScore.js";
 import { formatDateTime } from "../lib/format.js";
+
+// Human Agent Mode — leads created before this feature shipped (or never
+// toggled) have no `mode` field at all. Treat that as "ai", the existing
+// default behavior, so nothing regresses for conversations already in
+// flight.
+function isHumanMode(lead) {
+  return lead?.mode === "human";
+}
 
 export default function ChatCRM() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -64,6 +73,14 @@ export default function ChatCRM() {
 
   const selectedLead = leads.find((l) => l.id === selectedId) || null;
   const matchedProperty = selectedLead?.lastMatchedPropertyId ? properties[selectedLead.lastMatchedPropertyId] : null;
+  const humanMode = isHumanMode(selectedLead);
+
+  function setMode(nextMode) {
+    if (!selectedLead) return;
+    updateDoc(doc(db, "leads", selectedLead.id), { mode: nextMode }).catch((err) =>
+      console.error("Failed to update lead mode", err)
+    );
+  }
 
   return (
     <div className={"chat-page" + (selectedLead ? " conversation-open" : "")}>
@@ -98,6 +115,24 @@ export default function ChatCRM() {
                 </div>
               </div>
               <div className="chat-header-actions">
+                <div className="mode-toggle" role="group" aria-label="AI or human reply mode">
+                  <button
+                    className={"mode-toggle-btn" + (!humanMode ? " active-ai" : "")}
+                    onClick={() => setMode("ai")}
+                    title="AI replies automatically"
+                  >
+                    <Bot size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                    AI
+                  </button>
+                  <button
+                    className={"mode-toggle-btn" + (humanMode ? " active-human" : "")}
+                    onClick={() => setMode("human")}
+                    title="AI stops replying — you're in control"
+                  >
+                    <UserRound size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                    Human
+                  </button>
+                </div>
                 <ScoreRing score={scoreLead(selectedLead)} size={32} strokeWidth={3} showValue={false} />
                 <button className="btn btn-icon btn-ghost" onClick={() => setPanelOpen((v) => !v)} title="Toggle details">
                   {panelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
@@ -108,6 +143,8 @@ export default function ChatCRM() {
             <div className="chat-scroll">
               <ConversationThread history={selectedLead.conversationHistory} propertiesById={properties} />
             </div>
+
+            <MessageComposer phone={selectedLead.phone} />
           </>
         )}
       </div>

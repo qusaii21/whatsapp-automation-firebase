@@ -89,4 +89,37 @@ async function sendWhatsAppText({ to, text, whatsappToken, phoneNumberId }) {
   }
 }
 
-module.exports = { sendWhatsAppTemplate, sendWhatsAppText };
+/**
+ * Sends an image message with an optional caption. Used to present a
+ * property's photo alongside its details. `imageUrl` must be a publicly
+ * reachable URL (a Firebase Storage download URL works, since storage.rules
+ * allows public read on property-photos/).
+ */
+async function sendWhatsAppImage({ to, imageUrl, caption, whatsappToken, phoneNumberId }) {
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: { link: imageUrl, caption: caption || "" },
+  };
+
+  try {
+    const response = await axios.post(url, body, {
+      headers: {
+        Authorization: `Bearer ${whatsappToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+    return response.data;
+  } catch (err) {
+    console.error(
+      "sendWhatsAppImage failed:",
+      JSON.stringify(err.response?.data || err.message)
+    );
+    throw err;
+  }
+}
+
+module.exports = { sendWhatsAppTemplate, sendWhatsAppText, sendWhatsAppImage };

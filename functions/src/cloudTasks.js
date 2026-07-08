@@ -1,12 +1,33 @@
 const { CloudTasksClient } = require("@google-cloud/tasks");
-const { onInit } = require("firebase-functions/v2/core");
-const { REGION, FOLLOWUP_QUEUE_NAME } = require("./config");
+const { REGION, FOLLOWUP_QUEUE_NAME, MESSAGE_QUEUE_NAME } = require("./config");
 
-let tasksClient;
+const tasksClient = new CloudTasksClient();
 
-onInit(() => {
-  tasksClient = new CloudTasksClient();
-});
+/**
+ * Enqueues a Cloud Task that calls `functionName` almost immediately (no
+ * delay). Used to hand off the actual heavy lifting (Firestore + LLM +
+ * WhatsApp send) from the webhook handler, which needs to return 200 to
+ * Meta within a few seconds or risk duplicate-delivery retries.
+ */
+async function createImmediateTask(functionName, payload, projectId) {
+  const parent = tasksClient.queuePath(projectId, REGION, MESSAGE_QUEUE_NAME);
+  const targetUrl = `https://${REGION}-${projectId}.cloudfunctions.net/${functionName}`;
+
+  const task = {
+    httpRequest: {
+      httpMethod: "POST",
+      url: targetUrl,
+      headers: { "Content-Type": "application/json" },
+      body: Buffer.from(JSON.stringify(payload)).toString("base64"),
+      oidcToken: {
+        serviceAccountEmail: `${projectId}@appspot.gserviceaccount.com`,
+      },
+    },
+  };
+
+  const [response] = await tasksClient.createTask({ parent, task });
+  return response;
+}
 
 /**
  * Creates a single Cloud Task that will call the `followupCheck` HTTPS
@@ -46,4 +67,41 @@ async function createFollowupTask(phone, projectId) {
   return response;
 }
 
-module.exports = { createFollowupTask };
+/**
+ * Enqueues (or re-enqueues/chains) the drain task for one phone's message
+ * queue. Used by whatsappWebhook (first message after the phone was idle),
+ * and by processPhoneQueue itself to (a) chain into a fresh execution when
+ * it's running low on its time budget but the inbox isn't empty yet, and
+ * (b) back off before retrying after a transient failure.
+ *
+ * @param {string} phone
+ * @param {string} projectId
+ * @param {number} [delaySeconds] If >0, schedules the task instead of firing
+ *   immediately — used for retry backoff, never for the time-budget handoff
+ *   case (that one should run right away).
+ */
+async function createPhoneQueueTask(phone, projectId, delaySeconds = 0) {
+  const parent = tasksClient.queuePath(projectId, REGION, MESSAGE_QUEUE_NAME);
+  const targetUrl = `https://${REGION}-${projectId}.cloudfunctions.net/processPhoneQueue`;
+
+  const task = {
+    httpRequest: {
+      httpMethod: "POST",
+      url: targetUrl,
+      headers: { "Content-Type": "application/json" },
+      body: Buffer.from(JSON.stringify({ phone })).toString("base64"),
+      oidcToken: {
+        serviceAccountEmail: `${projectId}@appspot.gserviceaccount.com`,
+      },
+    },
+  };
+
+  if (delaySeconds > 0) {
+    task.scheduleTime = { seconds: Math.floor(Date.now() / 1000) + delaySeconds };
+  }
+
+  const [response] = await tasksClient.createTask({ parent, task });
+  return response;
+}
+
+module.exports = { createFollowupTask, createImmediateTask, createPhoneQueueTask };

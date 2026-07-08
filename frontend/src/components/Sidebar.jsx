@@ -17,6 +17,12 @@ export default function Sidebar() {
       >
         Properties
       </NavLink>
+      <NavLink
+        to="/insights"
+        className={({ isActive }) => "sidebar-link" + (isActive ? " active" : "")}
+      >
+        Insights
+      </NavLink>
     </nav>
   );
 }

@@ -25,6 +25,13 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Customer -> Opportunities: leads/{phone}/opportunities/{opportunityId}.
+    // Firestore rules aren't recursive, so this needs its own match even
+    // though it lives under a doc already allowed above.
+    match /leads/{phone}/{subcollection=**} {
+      allow read, write: if true;
+    }
+
     match /properties/{propertyId} {
       allow read, write: if true;
     }

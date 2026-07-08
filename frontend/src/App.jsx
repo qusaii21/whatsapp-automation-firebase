@@ -1,16 +1,20 @@
 import { Routes, Route } from "react-router-dom";
-import Sidebar from "./components/Sidebar.jsx";
-import Leads from "./pages/Leads.jsx";
+import NavRail from "./components/NavRail.jsx";
+import ChatCRM from "./pages/ChatCRM.jsx";
+import SmartLeads from "./pages/SmartLeads.jsx";
 import Properties from "./pages/Properties.jsx";
+import Insights from "./pages/Insights.jsx";
 
 export default function App() {
   return (
     <div className="app-shell">
-      <Sidebar />
+      <NavRail />
       <main className="main-content">
         <Routes>
-          <Route path="/" element={<Leads />} />
+          <Route path="/" element={<ChatCRM />} />
+          <Route path="/leads" element={<SmartLeads />} />
           <Route path="/properties" element={<Properties />} />
+          <Route path="/insights" element={<Insights />} />
         </Routes>
       </main>
     </div>

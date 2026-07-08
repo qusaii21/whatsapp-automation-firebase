@@ -5,7 +5,9 @@ admin.initializeApp();
 const { leadsWebhook } = require("./src/leadsWebhook");
 const { followupCheck } = require("./src/followupCheck");
 const { whatsappWebhook } = require("./src/whatsappWebhook");
+const { processPhoneQueue } = require("./src/processPhoneQueue");
 
 exports.leadsWebhook = leadsWebhook;
 exports.followupCheck = followupCheck;
 exports.whatsappWebhook = whatsappWebhook;
+exports.processPhoneQueue = processPhoneQueue;

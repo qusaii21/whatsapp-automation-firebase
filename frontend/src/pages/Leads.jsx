@@ -7,6 +7,7 @@ const STATUS_COLUMNS = [
   { key: "pending", label: "Pending" },
   { key: "replied", label: "Replied" },
   { key: "followed_up", label: "Followed Up" },
+  { key: "qualified", label: "Qualified" },
 ];
 
 export default function Leads() {
@@ -34,7 +35,7 @@ export default function Leads() {
   }, [leads, search]);
 
   const leadsByStatus = useMemo(() => {
-    const grouped = { pending: [], replied: [], followed_up: [] };
+    const grouped = { pending: [], replied: [], followed_up: [], qualified: [] };
     for (const lead of filteredLeads) {
       const bucket = grouped[lead.status] ? lead.status : "pending";
       grouped[bucket].push(lead);
@@ -76,6 +77,20 @@ export default function Leads() {
                   >
                     <div className="lead-name">{lead.name || "Unnamed lead"}</div>
                     <div className="lead-phone">{lead.phone}</div>
+                    <div className="lead-badges">
+                      {lead.extractedBedrooms != null && (
+                        <span className="badge">{lead.extractedBedrooms} BHK</span>
+                      )}
+                      {lead.extractedBudget != null && (
+                        <span className="badge">Budget {lead.extractedBudget}</span>
+                      )}
+                      {lead.propertyFound && (
+                        <span className="badge badge-success">Property shown</span>
+                      )}
+                      {lead.conversationEnded && (
+                        <span className="badge badge-muted">Conversation ended</span>
+                      )}
+                    </div>
                   </button>
 
                   {isExpanded && (

@@ -86,6 +86,33 @@ const leadsWebhook = onRequest(
             const { leadgen_id: leadgenId } = change.value || {};
             if (!leadgenId) continue;
 
+            const db = admin.firestore();
+
+            // Meta redelivers leadgen webhooks (on slow responses, retries,
+            // occasional dupes) exactly like it does message webhooks. This
+            // handler previously had NO dedup at all, which meant a
+            // redelivery would: (a) resend the welcome template to a lead
+            // who already got it, (b) schedule a SECOND 24h follow-up task
+            // for the same lead, and (c) — worst — blindly overwrite
+            // `conversationHistory: []` even if the lead had already started
+            // chatting, silently wiping their conversation. Guard the whole
+            // thing with the same atomic claim pattern used for inbound
+            // messages, keyed by leadgen_id.
+            const dedupeRef = db.collection("processedLeadgenEvents").doc(leadgenId);
+            const alreadyHandled = await db.runTransaction(async (tx) => {
+              const dedupeSnap = await tx.get(dedupeRef);
+              if (dedupeSnap.exists) return true;
+              tx.set(dedupeRef, {
+                handledAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              return false;
+            });
+
+            if (alreadyHandled) {
+              logger.info("leadsWebhook: duplicate leadgen delivery, skipping", { leadgenId });
+              continue;
+            }
+
             const { name, phone } = await fetchLeadDetails(
               leadgenId,
               FB_PAGE_ACCESS_TOKEN.value()
@@ -96,19 +123,22 @@ const leadsWebhook = onRequest(
               continue;
             }
 
-            const db = admin.firestore();
             const leadRef = db.collection("leads").doc(phone);
+            const existingSnap = await leadRef.get();
 
-            await leadRef.set(
-              {
-                name,
-                phone,
-                status: "pending",
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                conversationHistory: [],
-              },
-              { merge: true }
-            );
+            // Only initialize conversationHistory for a brand-new lead —
+            // never stomp an existing conversation just because the same
+            // (or a second) leadgen event came in for this phone number.
+            const leadDoc = {
+              name,
+              phone,
+              status: "pending",
+            };
+            if (!existingSnap.exists) {
+              leadDoc.createdAt = admin.firestore.FieldValue.serverTimestamp();
+              leadDoc.conversationHistory = [];
+            }
+            await leadRef.set(leadDoc, { merge: true });
 
             // 1. Send the WhatsApp welcome template.
             await sendWhatsAppTemplate({

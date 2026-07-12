@@ -6,6 +6,7 @@ const { FB_VERIFY_TOKEN, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID } = require(".
 const { createPhoneQueueTask } = require("./cloudTasks");
 const { enqueueInboxItem, tryAcquireLock } = require("./dispatcher");
 const { sendWhatsAppText } = require("./whatsapp");
+const { applyRecipientStatusUpdate, CampaignError } = require("./campaigns");
 
 // PHASE 7 — non-text inputs must never be silently dropped. These are sent
 // directly from the webhook (no LLM call — this is a deterministic
@@ -37,6 +38,98 @@ function conversationHistoryPlaceholder(type) {
     contacts: "[shared contact]",
   };
   return labels[type] || `[${type} message]`;
+}
+
+// Maps a WhatsApp Cloud API status webhook value -> our recipient status.
+// "sent" is deliberately NOT mapped: we already record "sent" ourselves the
+// moment processCampaignRecipient.js's send call returns a message id, so
+// Meta's own "sent" status webhook is just a confirmation of something we
+// already know and needs no transition. Any other/future status value Meta
+// might add falls through the map to `undefined` and is safely ignored
+// rather than throwing.
+const STATUS_TO_RECIPIENT_STATUS = {
+  delivered: "delivered",
+  read: "read",
+  failed: "failed",
+};
+
+/**
+ * LOOPHOLE FIX: WhatsApp Cloud API sends delivery/read/failure status
+ * updates as separate webhook deliveries (`value.statuses`, no
+ * `value.messages`) — completely distinct from inbound messages. This
+ * handler used to `continue` past every one of these with the comment "e.g.
+ * a status update, not a message", so a campaign recipient could never
+ * progress past "sent": deliveredCount/readCount on every campaign always
+ * stayed 0, and a message that failed AFTER being accepted by Meta (a very
+ * common real-world case — e.g. the 24-hour customer-service window closing,
+ * or the number being invalid) was silently lost instead of being recorded
+ * as failed.
+ *
+ * Looks up which campaign recipient (if any) this status belongs to via a
+ * collection-group query on `messageId` (see firestore.indexes.json — this
+ * needs a COLLECTION_GROUP index on recipients.messageId) and applies the
+ * matching transition through campaigns.js's existing
+ * applyRecipientStatusUpdate, which already validates the transition and
+ * increments the right campaign counter. A message with no matching
+ * recipient (a manual message or an agent auto-reply, not a campaign send)
+ * is a normal, expected no-op here — this handler is scoped to CAMPAIGN
+ * message tracking only.
+ */
+async function handleMessageStatusUpdate(db, status) {
+  const newRecipientStatus = STATUS_TO_RECIPIENT_STATUS[status?.status];
+  if (!newRecipientStatus || !status?.id) return;
+
+  let matches;
+  try {
+    matches = await db.collectionGroup("recipients").where("messageId", "==", status.id).limit(1).get();
+  } catch (err) {
+    logger.error("whatsappWebhook: recipient lookup by messageId failed", {
+      messageId: status.id,
+      error: err.message,
+    });
+    return;
+  }
+  if (matches.empty) return; // not a campaign-sent message
+
+  const recipientDoc = matches.docs[0];
+  const campaignId = recipientDoc.ref.parent.parent.id;
+  const recipientId = recipientDoc.id;
+
+  const errorMessage =
+    newRecipientStatus === "failed"
+      ? status.errors?.[0]?.title || status.errors?.[0]?.message || "WhatsApp reported a delivery failure."
+      : undefined;
+
+  try {
+    await applyRecipientStatusUpdate(db, campaignId, recipientId, newRecipientStatus, {
+      error: errorMessage,
+      messageId: status.id,
+    });
+    logger.info("whatsappWebhook: recipient status updated", {
+      campaignId,
+      recipientId,
+      status: newRecipientStatus,
+    });
+  } catch (err) {
+    if (err instanceof CampaignError && err.code === "failed_precondition") {
+      // Out-of-order or duplicate status webhook (Meta redelivers these) —
+      // the transition just isn't legal from the recipient's current state
+      // anymore. Expected, not an error.
+      logger.info("whatsappWebhook: status transition not applicable, skipping", {
+        campaignId,
+        recipientId,
+        attemptedStatus: newRecipientStatus,
+        reason: err.message,
+      });
+      return;
+    }
+    logger.warn("whatsappWebhook: failed to apply recipient status update", {
+      campaignId,
+      recipientId,
+      attemptedStatus: newRecipientStatus,
+      error: err.message,
+    });
+  }
 }
 
 /**
@@ -84,7 +177,16 @@ const whatsappWebhook = onRequest(
           for (const change of entry.changes || []) {
             const value = change.value || {};
             const messages = value.messages || [];
-            if (messages.length === 0) continue; // e.g. a status update, not a message
+            const statuses = value.statuses || [];
+
+            // Delivery/read/failed status updates for messages WE sent
+            // (campaign sends in particular) — see handleMessageStatusUpdate
+            // for why this used to be silently dropped.
+            for (const status of statuses) {
+              await handleMessageStatusUpdate(db, status);
+            }
+
+            if (messages.length === 0) continue; // pure status payload, nothing more to do
 
             const contactName = value.contacts && value.contacts[0]?.profile?.name;
 

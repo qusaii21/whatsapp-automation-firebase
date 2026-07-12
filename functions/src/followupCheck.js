@@ -6,6 +6,7 @@ const {
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_NUMBER_ID,
   WHATSAPP_FOLLOWUP_TEMPLATE,
+  FOLLOWUP_CLAIM_STALE_MS,
 } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
 
@@ -44,30 +45,46 @@ const followupCheck = onRequest(
 
       const lead = snap.data();
 
-      if (lead.status === "pending") {
+      if (lead.status === "pending" || lead.status === "sending_followup") {
         // Same at-least-once-delivery hazard as processIncomingMessage: if
         // this function times out or crashes AFTER sendWhatsAppTemplate()
         // succeeds but BEFORE the status update commits, Cloud Tasks will
         // retry and status is still "pending" — sending a second follow-up.
-        // Atomically flip status to a transitional "sending" state first so
-        // a retry that lands after a successful send sees a status other
-        // than "pending" and skips.
+        // Atomically flip status to a transitional "sending_followup" state
+        // first so a retry that lands after a successful send sees a status
+        // other than "pending" and skips.
+        //
+        // LOOPHOLE FIX: this used to only ever check `status === "pending"`,
+        // so a crash AFTER the claim committed but BEFORE
+        // sendWhatsAppTemplate actually succeeded left the lead permanently
+        // stuck at "sending_followup" — no code path ever retried it, and the
+        // follow-up was silently lost forever (this was previously called
+        // out as a known, accepted trade-off in this comment; a stale-claim
+        // check closes it using the same STALE_CLAIM_MS pattern already used
+        // elsewhere in this codebase, e.g. processIncomingMessage.js).
         const claimed = await db.runTransaction(async (tx) => {
           const freshSnap = await tx.get(leadRef);
-          if (!freshSnap.exists || freshSnap.data().status !== "pending") return false;
-          tx.update(leadRef, { status: "sending_followup" });
+          if (!freshSnap.exists) return false;
+          const freshData = freshSnap.data();
+
+          if (freshData.status === "sending_followup") {
+            const claimedAtMs = freshData.followupClaimedAt?.toMillis
+              ? freshData.followupClaimedAt.toMillis()
+              : 0;
+            const isStale = Date.now() - claimedAtMs > FOLLOWUP_CLAIM_STALE_MS;
+            if (!isStale) return false; // a healthy attempt is still in flight
+          } else if (freshData.status !== "pending") {
+            return false; // already progressed past follow-up entirely
+          }
+
+          tx.update(leadRef, {
+            status: "sending_followup",
+            followupClaimedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
           return true;
         });
 
         if (!claimed) {
-          // Note: if a prior attempt crashed between claiming ("sending_followup")
-          // and the send actually succeeding, this now permanently skips retrying
-          // that lead's follow-up rather than risking a duplicate send. Given this
-          // runs once per lead (not a recurring job) and a missed follow-up is a
-          // much smaller problem than spamming a lead twice, that trade-off is
-          // intentional. If missed follow-ups turn out to matter more in practice,
-          // add a staleness check here (same pattern as STALE_CLAIM_MS in
-          // processIncomingMessage.js) to allow a stuck claim to be retried.
           logger.info("followupCheck: lost race or already handled, no-op", { phone });
           res.sendStatus(200);
           return;

@@ -6,6 +6,7 @@ const {
   pauseCampaign: pauseCampaignTx,
   resumeCampaign: resumeCampaignTx,
   cancelCampaign: cancelCampaignTx,
+  completeCampaignIfFinished,
   CampaignError,
 } = require("./campaigns");
 const { cancelQueuedTasks, dispatchCampaignQueue: runDispatch } = require("./campaignQueue");
@@ -159,7 +160,26 @@ const retryCampaignDispatch = onRequest(
       const projectId = process.env.GCLOUD_PROJECT;
       const result = await runDispatch(db, campaignId, projectId);
       logger.info("campaignControl: retry dispatch run", { campaignId, ...result });
-      return result;
+
+      // Also covers a campaign that finished sending before
+      // completeCampaignIfFinished existed (or whose completion check
+      // otherwise never fired) and is stuck showing "Sending" with nothing
+      // left to do — same no-op-unless-actually-finished guard as the
+      // automatic check in processCampaignRecipient.js.
+      let completion = null;
+      try {
+        completion = await completeCampaignIfFinished(db, campaignId);
+        if (completion) {
+          logger.info("campaignControl: retry dispatch also completed a stuck campaign", { campaignId });
+        }
+      } catch (err) {
+        logger.warn("campaignControl: completion check failed during retry dispatch", {
+          campaignId,
+          error: err.message,
+        });
+      }
+
+      return { ...result, completion };
     });
   }
 );

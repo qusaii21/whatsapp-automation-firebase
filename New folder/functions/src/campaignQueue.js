@@ -20,13 +20,8 @@ const {
  * ---------------------------------------------------------------------------
  * Turns a "queued" campaign's recipient list into one Cloud Task per
  * recipient. THIS FILE IS FOUNDATION ONLY, same posture as campaigns.js:
- *   - No WhatsApp Cloud API calls anywhere in this file.
- *   - Tasks are created pointing at `processCampaignRecipient`, a worker
- *     endpoint that does NOT exist yet — a future phase implements the
- *     actual send. Until it's deployed, Cloud Tasks will get a 404
- *     delivering these and retry per the queue's own retry config. That's
- *     expected and harmless: nothing sends a message because nothing is
- *     listening yet.
+ *   - No WhatsApp Cloud API calls anywhere in this file — that lives in
+ *     processCampaignRecipient.js, the worker these tasks point at.
  *
  * TRIGGER: this codebase has no Firestore-trigger (onDocumentUpdated)
  * functions anywhere — every side effect is driven by an explicit HTTP call

@@ -104,6 +104,12 @@ const CAMPAIGN_RECIPIENT_SEND_CLAIM_STALE_MS = 5 * 60 * 1000;
 // being retried indefinitely.
 const CAMPAIGN_RECIPIENT_MAX_ATTEMPTS = 5;
 
+// A follow-up claim ("sending_followup") held longer than this is assumed to
+// belong to a crashed/failed attempt (e.g. sendWhatsAppTemplate threw after
+// the claim committed) rather than a still-running one, and can be retried
+// instead of being permanently skipped — see followupCheck.js.
+const FOLLOWUP_CLAIM_STALE_MS = 5 * 60 * 1000;
+
 module.exports = {
   FB_VERIFY_TOKEN,
   FB_PAGE_ACCESS_TOKEN,
@@ -131,4 +137,5 @@ module.exports = {
   CAMPAIGN_RECIPIENT_TIMEOUT_SECONDS,
   CAMPAIGN_RECIPIENT_SEND_CLAIM_STALE_MS,
   CAMPAIGN_RECIPIENT_MAX_ATTEMPTS,
+  FOLLOWUP_CLAIM_STALE_MS,
 };

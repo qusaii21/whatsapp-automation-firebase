@@ -72,7 +72,12 @@ const CAMPAIGN_STATUS_TRANSITIONS = {
 const RECIPIENT_STATUS_TRANSITIONS = {
   pending: ["queued", "failed"],
   queued: ["sent", "failed"],
-  sent: ["delivered", "failed"],
+  // "read" is reachable directly from "sent" (not just via "delivered") —
+  // WhatsApp's delivered/read status webhooks aren't strictly ordered, and a
+  // "read" receipt can arrive without a preceding "delivered" one ever being
+  // seen (e.g. it was missed, or the recipient's chat was already open).
+  // Treating that as illegal would silently drop the read receipt forever.
+  sent: ["delivered", "read", "failed"],
   delivered: ["read", "failed"],
   read: [],
   failed: [],
@@ -667,6 +672,52 @@ async function applyRecipientStatusUpdate(db, campaignId, recipientId, newStatus
   });
 }
 
+/**
+ * Best-effort completion check. If a "sending" campaign has no recipients
+ * left outstanding — every recipient has at least had one send attempt
+ * resolved, i.e. `sentCount + failedCount` has caught up to
+ * `totalRecipients` — transitions it to "completed" and appends a timeline
+ * event. No-ops (returns null) if the campaign isn't "sending" yet, or still
+ * has recipients left pending/queued.
+ *
+ * Not triggered by a poll/cron — processCampaignRecipient.js calls this
+ * after every recipient outcome is recorded, so a campaign's status reflects
+ * reality (the same "call it right after the state that could make it true
+ * changes" posture as its own best-effort queued->sending flip) without a
+ * separate completion-detection job. "completed" here means every send was
+ * *attempted*, not that every message was delivered/read — sent/delivered/
+ * read recipients all count as resolved, since delivery/read status can
+ * still update later via webhook without the campaign itself needing to
+ * stay "sending".
+ */
+async function completeCampaignIfFinished(db, campaignId) {
+  const campaignRef = campaignsCollection(db).doc(campaignId);
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(campaignRef);
+    if (!snap.exists) return null;
+    const campaign = snap.data();
+
+    if (campaign.status !== "sending") return null;
+
+    const resolved = (campaign.sentCount || 0) + (campaign.failedCount || 0);
+    if (resolved < (campaign.totalRecipients || 0)) return null;
+
+    const allowed = CAMPAIGN_STATUS_TRANSITIONS[campaign.status] || [];
+    if (!allowed.includes("completed")) return null;
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    tx.update(campaignRef, {
+      status: "completed",
+      completedAt: now,
+      timeline: admin.firestore.FieldValue.arrayUnion(buildTimelineEvent("completed")),
+      updatedAt: now,
+    });
+
+    return { id: campaignId, previousStatus: "sending", status: "completed" };
+  });
+}
+
 module.exports = {
   CAMPAIGN_TYPES,
   CAMPAIGN_STATUSES,
@@ -692,4 +743,5 @@ module.exports = {
   resumeCampaign,
   cancelCampaign,
   applyRecipientStatusUpdate,
+  completeCampaignIfFinished,
 };

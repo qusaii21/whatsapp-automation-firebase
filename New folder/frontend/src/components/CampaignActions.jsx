@@ -29,6 +29,7 @@ import { functionsBaseUrl } from "../lib/functions.js";
  */
 
 const CANCELLABLE_STATUSES = ["draft", "queued", "sending", "paused"];
+const RETRYABLE_STATUSES = ["queued", "sending"];
 
 export default function CampaignActions({ campaignId, campaign, onNavigate }) {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
@@ -45,7 +46,7 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
   if (!campaign) return null;
 
   const canCancel = CANCELLABLE_STATUSES.includes(campaign.status);
-  const canRetryDispatch = campaign.status === "queued";
+  const canRetryDispatch = RETRYABLE_STATUSES.includes(campaign.status);
 
   async function handleCancel() {
     if (!confirmingCancel) {
@@ -132,7 +133,8 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
 
         {canRetryDispatch && (
           <button type="button" className="btn btn-ghost" disabled={retrying} onClick={handleRetryDispatch}>
-            <RefreshCw size={14} /> {retrying ? "Retrying…" : "Retry Dispatch"}
+            <RefreshCw size={14} />{" "}
+            {retrying ? "Refreshing…" : campaign.status === "sending" ? "Refresh Status" : "Retry Dispatch"}
           </button>
         )}
 
@@ -163,7 +165,9 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
 
       {retryResult && !retryError && (
         <div className="empty-note" style={{ marginTop: 12 }}>
-          {retryResult.skipped
+          {retryResult.completion
+            ? "All recipients resolved — campaign marked Completed."
+            : retryResult.skipped
             ? `Nothing to retry (${retryResult.reason || retryResult.status || "no pending recipients"}).`
             : `Retried dispatch: ${retryResult.enqueuedThisRun ?? 0} recipient(s) enqueued this run${
                 retryResult.chained ? ", continuing in the background" : ""

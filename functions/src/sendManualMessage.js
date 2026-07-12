@@ -21,12 +21,25 @@ const { sendWhatsAppText } = require("./whatsapp");
  * It writes the exact same turn SHAPE the AI pipeline writes
  * (`{ role, text, timestamp }`, see processPhoneQueue.js's `assistantTurn`),
  * plus `sentBy: "human"` so the CRM thread (ConversationThread.jsx already
- * checks for this) can render it distinctly from an AI reply. Because it's
- * appended to the SAME `conversationHistory` array the AI reads from, the
- * moment a lead is switched back to AI mode, `runAgent` sees this message
- * like any other past assistant turn (see agent.js's `historyToMessages`,
- * which treats every non-"user" role as an AIMessage) — no separate merge
- * step needed for the "AI continues seamlessly" requirement.
+ * checks for this — via `sentBy === "human"`, not `role`) can render it
+ * distinctly from an AI reply. Because it's appended to the SAME
+ * `conversationHistory` array the AI reads from, the moment a lead is
+ * switched back to AI mode, `runAgent` sees this message like any other past
+ * assistant turn (see agent.js's `historyToMessages`, which treats every
+ * non-"user" role as an AIMessage) — no separate merge step needed for the
+ * "AI continues seamlessly" requirement.
+ *
+ * IMPORTANT: `role` here MUST be `"assistant"`, matching every other
+ * bot-side turn — NOT a distinct `"agent"` role. agent.js's requirement-
+ * extraction step (`.find((turn) => turn.role === "assistant")`, used to
+ * look up "what did we just say to this customer" for detecting a changed
+ * requirement) filters specifically on `role === "assistant"`. A distinct
+ * `"agent"` role would make that lookup silently skip straight past a human
+ * agent's reply to an OLDER bot turn (or find nothing) every time a human
+ * agent's message is the most recent one before the customer's next
+ * message — corrupting that context for no visible error. `sentBy: "human"`
+ * is what the UI actually keys off for the "Human agent" badge, so `role`
+ * is free to stay consistent with the rest of the pipeline.
  *
  * Deliberately does NOT touch `leads/{phone}/opportunities/*` — the
  * customer -> opportunities architecture is exclusively updated by the AI
@@ -71,7 +84,7 @@ const sendManualMessage = onRequest(
       const leadRef = db.collection("leads").doc(phone);
 
       const turn = {
-        role: "agent",
+        role: "assistant",
         text: trimmedText,
         timestamp: Date.now(),
         sentBy: "human",

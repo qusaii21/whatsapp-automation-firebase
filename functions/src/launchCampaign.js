@@ -12,11 +12,11 @@ const { dispatchCampaignQueue } = require("./campaignQueue");
  * Validates a draft campaign end-to-end and, if every check passes, flips it
  * to "queued", then immediately triggers the queue engine
  * (campaignQueue.js's dispatchCampaignQueue) to create one Cloud Task per
- * recipient. Still does NOT call the WhatsApp Cloud API — that's the same
- * "foundation only" boundary createCampaign.js / addCampaignRecipients.js
- * draw for their own features. Cloud Tasks created here point at a worker
- * endpoint (`processCampaignRecipient`) that doesn't exist yet; a future
- * sending feature implements it and picks up from "queued" -> "sending"
+ * recipient. Still does NOT call the WhatsApp Cloud API itself — that's the
+ * same "foundation only" boundary createCampaign.js / addCampaignRecipients.js
+ * draw for their own features. Cloud Tasks created here point at
+ * `processCampaignRecipient` (processCampaignRecipient.js), the worker that
+ * does the actual send and picks up from "queued" -> "sending"
  * (already a legal transition in campaigns.js's CAMPAIGN_STATUS_TRANSITIONS).
  *
  * Dispatch is triggered by a direct in-process function call, not a second

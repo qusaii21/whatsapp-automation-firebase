@@ -72,7 +72,12 @@ const CAMPAIGN_STATUS_TRANSITIONS = {
 const RECIPIENT_STATUS_TRANSITIONS = {
   pending: ["queued", "failed"],
   queued: ["sent", "failed"],
-  sent: ["delivered", "failed"],
+  // "read" is reachable directly from "sent" (not just via "delivered") —
+  // WhatsApp's delivered/read status webhooks aren't strictly ordered, and a
+  // "read" receipt can arrive without a preceding "delivered" one ever being
+  // seen (e.g. it was missed, or the recipient's chat was already open).
+  // Treating that as illegal would silently drop the read receipt forever.
+  sent: ["delivered", "read", "failed"],
   delivered: ["read", "failed"],
   read: [],
   failed: [],

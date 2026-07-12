@@ -14,6 +14,7 @@ const {
   campaignsCollection,
   recipientsCollection,
   updateCampaignStatus,
+  completeCampaignIfFinished,
   CampaignError,
 } = require("./campaigns");
 const { assertTemplateApprovedForCampaign, TemplateError } = require("./whatsappTemplates");
@@ -364,6 +365,29 @@ function classifySendError(err) {
   };
 }
 
+/**
+ * Best-effort wrapper around campaigns.js's completeCampaignIfFinished —
+ * called after every recipient outcome that could be the LAST one
+ * outstanding (a terminal `sent` or a permanent `failed`; never after a
+ * transient failure, since the recipient is still `queued` and the campaign
+ * is by definition not finished). Never allowed to affect the HTTP response
+ * for this recipient — a failure here just means the campaign's status
+ * lags reality slightly, not that this recipient's own outcome was lost.
+ */
+async function checkCampaignCompletion(db, campaignId) {
+  try {
+    const result = await completeCampaignIfFinished(db, campaignId);
+    if (result) {
+      logger.info("processCampaignRecipient: campaign completed", { campaignId });
+    }
+  } catch (err) {
+    logger.warn("processCampaignRecipient: completion check failed", {
+      campaignId,
+      error: err.message,
+    });
+  }
+}
+
 const processCampaignRecipient = onRequest(
   {
     secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID],
@@ -429,6 +453,7 @@ const processCampaignRecipient = onRequest(
       } catch (err) {
         const message = err instanceof CampaignError || err instanceof TemplateError ? err.message : err.message;
         await finalizeFailure(db, campaignId, recipientId, message, { permanent: true });
+        await checkCampaignCompletion(db, campaignId);
         logger.warn("processCampaignRecipient: template no longer approved, recipient failed permanently", {
           campaignId,
           recipientId,
@@ -448,6 +473,7 @@ const processCampaignRecipient = onRequest(
         await finalizeFailure(db, campaignId, recipientId, "Recipient has opted out of WhatsApp messages.", {
           permanent: true,
         });
+        await checkCampaignCompletion(db, campaignId);
         logger.info("processCampaignRecipient: recipient opted out, skipping permanently", {
           campaignId,
           recipientId,
@@ -475,6 +501,9 @@ const processCampaignRecipient = onRequest(
         const permanent = !classification.retryable || outOfAttempts;
 
         await finalizeFailure(db, campaignId, recipientId, classification.message, { permanent });
+        if (permanent) {
+          await checkCampaignCompletion(db, campaignId);
+        }
 
         logger.warn("processCampaignRecipient: send failed", {
           campaignId,
@@ -516,6 +545,7 @@ const processCampaignRecipient = onRequest(
       }
 
       await finalizeSuccess(db, campaignId, recipientId, messageId);
+      await checkCampaignCompletion(db, campaignId);
 
       logger.info("processCampaignRecipient: sent", { campaignId, recipientId, messageId, attempts });
       res.status(200).json({ ok: true, recipientId, messageId });

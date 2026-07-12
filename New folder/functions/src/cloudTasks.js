@@ -135,11 +135,8 @@ function campaignRecipientTaskName(projectId, campaignId, recipientId, attempt) 
 
 /**
  * Creates the Cloud Task for one campaign recipient's send attempt. Points
- * at `processCampaignRecipient` — a worker endpoint that does NOT exist yet
- * (a future phase implements the actual WhatsApp send). Until it's deployed,
- * Cloud Tasks will get a 404 delivering these and retry per the queue's own
- * retry config; that's expected and harmless, since nothing sends a message
- * until that endpoint exists.
+ * at `processCampaignRecipient` (processCampaignRecipient.js) — the worker
+ * that actually calls the WhatsApp Cloud API for this recipient.
  *
  * Treats ALREADY_EXISTS as a successful, idempotent no-op (see
  * campaignRecipientTaskName above) rather than throwing — the caller doesn't

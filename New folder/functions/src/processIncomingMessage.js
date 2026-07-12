@@ -13,6 +13,18 @@ const { runAgent } = require("./agent");
 const STALE_CLAIM_MS = 5 * 60 * 1000;
 
 /**
+ * ⚠️ NOT DEPLOYED / NOT CALLED BY ANYTHING — found during an audit of this
+ * codebase. This file is never `require()`'d anywhere and `processIncomingMessage`
+ * is never exported from index.js, so it is not a live Cloud Function. It
+ * predates the per-phone dispatcher/inbox queue (dispatcher.js) and has been
+ * fully superseded by processPhoneQueue.js's own `processOneMessage`, which
+ * does everything this file does plus the opportunities-collection
+ * integration, dead-lettering, and backoff retry state machine (Phases 4/6).
+ * The rest of this docstring is the ORIGINAL (now inaccurate) description,
+ * left as-is for history — do not trust the "Invoked asynchronously via
+ * Cloud Tasks from whatsappWebhook" claim below; whatsappWebhook.js calls
+ * createPhoneQueueTask (-> processPhoneQueue), never this function.
+ *
  * Does the actual work for one incoming WhatsApp message: updates the lead
  * record, runs the AI agent, sends the reply (and a property photo if one
  * was matched), and persists everything the agent extracted so the CRM can

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { addDoc, collection, deleteDoc, doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes, deleteObject } from "firebase/storage";
 import { Search, Plus, X, Star, BedDouble, Bath, Ruler, MapPin, Trash2, Pencil } from "lucide-react";
@@ -78,6 +79,7 @@ function csvToArray(v) {
 }
 
 export default function Properties() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -102,6 +104,15 @@ export default function Properties() {
       () => setLoading(false)
     );
     return unsubscribe;
+  }, []);
+
+  // Deep link from the Dashboard's "Add Property" quick action.
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      openNew();
+      setSearchParams({}, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filtered = useMemo(() => {

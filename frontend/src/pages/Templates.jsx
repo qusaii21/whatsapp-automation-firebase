@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { collection, doc, onSnapshot, updateDoc } from "firebase/firestore";
 import {
   FileText, RefreshCw, Search, X, Plus, ChevronDown, ChevronUp,
@@ -1058,6 +1059,7 @@ function TemplateDetailDrawer({ template, onClose, onRefresh, refreshing }) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Templates() {
+  const [searchParams, setSearchParams]   = useSearchParams();
   const [templates, setTemplates]         = useState([]);
   const [loading, setLoading]             = useState(true);
   const [search, setSearch]               = useState("");
@@ -1068,6 +1070,15 @@ export default function Templates() {
   const [createOpen, setCreateOpen]       = useState(false);
   const [refreshingId, setRefreshingId]   = useState(null);
   const [toast, setToast]                 = useState(null);
+
+  // Deep link from the Dashboard's "Create Template" quick action.
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      setCreateOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Live Firestore listener
   useEffect(() => {

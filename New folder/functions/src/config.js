@@ -110,6 +110,56 @@ const CAMPAIGN_RECIPIENT_MAX_ATTEMPTS = 5;
 // instead of being permanently skipped — see followupCheck.js.
 const FOLLOWUP_CLAIM_STALE_MS = 5 * 60 * 1000;
 
+// --- Cost estimation (metrics.js) ------------------------------------------
+// Every rate below feeds metrics.js's cost/credit recorders. These are
+// ESTIMATES for internal usage/cost tracking — the actual Groq and Meta
+// invoices are the only billing source of truth. Nothing outside metrics.js
+// reads these directly, so adjusting a rate here (a pricing change, a new
+// model, a new Meta rate card) never requires touching a call site.
+
+// Groq per-token USD pricing, keyed by the exact model string passed to
+// `new ChatGroq({ model: ... })` elsewhere in this codebase (agent.js,
+// intentClassifier.js, currentRequirementExtractor.js). Published per-1M-
+// token rates, divided down to a per-token rate so metrics.js can multiply
+// directly against raw token counts.
+const LLM_PRICING_USD_PER_TOKEN = {
+  "llama-3.3-70b-versatile": { input: 0.59 / 1_000_000, output: 0.79 / 1_000_000 },
+  "llama-3.1-8b-instant": { input: 0.05 / 1_000_000, output: 0.08 / 1_000_000 },
+};
+
+// Fallback rate for any model string not in the table above (e.g. after a
+// model swap the table hasn't been updated for yet), so usage is never
+// silently recorded at $0 — it just falls back to the closest known rate
+// (the main agent model) until the table is updated.
+const LLM_PRICING_DEFAULT_USD_PER_TOKEN = LLM_PRICING_USD_PER_TOKEN["llama-3.3-70b-versatile"];
+
+// Meta's own per-message charge, in USD, by WhatsApp conversation category
+// (Meta's April-2025-era per-message pricing model). "service" covers
+// free-form replies inside the customer-service window (AI/human agent
+// replies, non-text acks) and is typically $0; "utility"/"marketing" cover
+// business-initiated template sends (lead welcome, follow-up, campaigns);
+// "authentication" is included for completeness even though this CRM
+// doesn't currently send OTP-style templates. ADJUST THESE to your actual
+// Meta rate card / country rate — they vary by destination country and
+// change periodically.
+const META_WHATSAPP_RATE_USD = {
+  service: 0.0,
+  utility: 0.02,
+  marketing: 0.04,
+  authentication: 0.03,
+};
+
+// Multiplier applied on top of META_WHATSAPP_RATE_USD to estimate the total
+// "WhatsApp cost" line — Meta's own charge plus any BSP/platform markup this
+// business pays on top of the raw Graph API rate. Set to 1.0 (no markup)
+// when sending directly via Meta's own Graph API, as this codebase does.
+const WHATSAPP_BSP_MARKUP_MULTIPLIER = 1.0;
+
+// How many credits one estimated USD of spend (AI + WhatsApp combined)
+// consumes. Purely a display/allocation unit for the dashboard's "Estimated
+// Credits" figure — has no effect on what Groq/Meta actually bill.
+const CREDITS_PER_USD = 100;
+
 module.exports = {
   FB_VERIFY_TOKEN,
   FB_PAGE_ACCESS_TOKEN,
@@ -138,4 +188,9 @@ module.exports = {
   CAMPAIGN_RECIPIENT_SEND_CLAIM_STALE_MS,
   CAMPAIGN_RECIPIENT_MAX_ATTEMPTS,
   FOLLOWUP_CLAIM_STALE_MS,
+  LLM_PRICING_USD_PER_TOKEN,
+  LLM_PRICING_DEFAULT_USD_PER_TOKEN,
+  META_WHATSAPP_RATE_USD,
+  WHATSAPP_BSP_MARKUP_MULTIPLIER,
+  CREDITS_PER_USD,
 };

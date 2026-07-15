@@ -324,6 +324,15 @@ export default function Campaigns() {
     return unsubscribe;
   }, []);
 
+  // Deep link from the Dashboard's "Create Campaign" quick action.
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      openCreateDrawer();
+      setSearchParams({}, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Category -> Template -> Language cascade. Each level is derived from
   // the previous form selection, so the dropdowns always narrow correctly
   // even as `templates` updates live from Firestore.

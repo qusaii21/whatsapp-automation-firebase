@@ -2,6 +2,9 @@ const { ChatGroq } = require("@langchain/groq");
 const { z } = require("zod");
 const { HumanMessage, AIMessage, SystemMessage } = require("@langchain/core/messages");
 const logger = require("firebase-functions/logger");
+const { extractUsage } = require("./llmUsage");
+
+const EXTRACTOR_MODEL = "llama-3.1-8b-instant";
 
 /**
  * CURRENT REQUIREMENT EXTRACTION
@@ -90,9 +93,14 @@ async function extractCurrentRequirement({ previousAssistantMessage, latestUserM
     apiKey: groqApiKey,
     // Small/fast model is enough for this narrow extraction, same choice as
     // the intent classifier — keeps the extra round trip cheap.
-    model: "llama-3.1-8b-instant",
+    model: EXTRACTOR_MODEL,
     temperature: 0,
-  }).withStructuredOutput(currentRequirementSchema, { name: "extract_current_requirement" });
+    // includeRaw: true — see intentClassifier.js's comment on the same
+    // option; needed here for the same reason (METRICS ENGINE token usage).
+  }).withStructuredOutput(currentRequirementSchema, {
+    name: "extract_current_requirement",
+    includeRaw: true,
+  });
 
   const messages = [
     new SystemMessage(CURRENT_REQUIREMENT_PROMPT),
@@ -102,20 +110,24 @@ async function extractCurrentRequirement({ previousAssistantMessage, latestUserM
     new HumanMessage(latestUserMessage || ""),
   ];
 
-  const result = await llm.invoke(messages);
+  const { raw, parsed } = await llm.invoke(messages);
 
   logger.info("currentRequirementExtractor: extracted", {
-    propertyType: result.propertyType,
-    listingType: result.listingType,
-    purpose: result.purpose,
+    propertyType: parsed.propertyType,
+    listingType: parsed.listingType,
+    purpose: parsed.purpose,
     latestUserMessage,
     hadPreviousAssistantMessage: Boolean(previousAssistantMessage),
   });
 
+  // METRICS: see intentClassifier.js's identical comment.
+  const usage = { model: EXTRACTOR_MODEL, ...extractUsage(raw) };
+
   return {
-    propertyType: result.propertyType || null,
-    listingType: result.listingType || null,
-    purpose: result.purpose || null,
+    propertyType: parsed.propertyType || null,
+    listingType: parsed.listingType || null,
+    purpose: parsed.purpose || null,
+    usage,
   };
 }
 

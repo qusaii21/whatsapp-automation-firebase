@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { collection, onSnapshot, query, getDocs } from "firebase/firestore"; // Added getDocs
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, LayoutGrid, Kanban, PhoneCall } from "lucide-react";
 import { db } from "../firebase.js";
 import Avatar from "../components/Avatar.jsx";
@@ -107,11 +107,12 @@ function CustomerGroup({ lead, opportunities, onOpen }) {
 
 export default function SmartLeads() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState("all");
-  const [view, setView] = useState("cards");
+  const [view, setView] = useState(searchParams.get("view") === "pipeline" ? "pipeline" : "cards");
   const [opportunitiesByLead, setOpportunitiesByLead] = useState({});
 
   useEffect(() => {
@@ -217,7 +218,7 @@ export default function SmartLeads() {
   }, [filtered, opportunitiesByLead]);
 
   function openChat(leadId, opportunityId) {
-    navigate(opportunityId ? `/?lead=${leadId}&opportunity=${opportunityId}` : `/?lead=${leadId}`);
+    navigate(opportunityId ? `/chats?lead=${leadId}&opportunity=${opportunityId}` : `/chats?lead=${leadId}`);
   }
 
   // Debugging logs triggered right before rendering execution

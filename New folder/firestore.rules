@@ -72,6 +72,39 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------------
+    // Dashboard Metrics
+    // -------------------------------------------------------------------------
+    // Same posture as campaigns/whatsappTemplates above: `metrics/dashboard`
+    // is a set of running counters moved ONLY by FieldValue.increment() calls
+    // inside functions/src/metrics.js (Cloud Functions use the Admin SDK and
+    // bypass these rules entirely). A stray client write here could desync a
+    // counter from the events it's derived from with no way to detect or
+    // repair it, so writes are closed. Reads are open so the dashboard can
+    // render every counter from a single `get()`/`onSnapshot()` on this one
+    // doc, matching how the rest of the CRM already reads live from Firestore.
+    match /metrics/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Daily / Weekly / Monthly rollups of the same counters as
+    // `metrics/dashboard` above (see functions/src/metrics.js's periodRefs/
+    // dayKey/isoWeekKey/monthKey) — one doc per calendar day / ISO week /
+    // calendar month, same write-closed/read-open posture and same reason.
+    match /metricsDaily/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /metricsWeekly/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /metricsMonthly/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // -------------------------------------------------------------------------
     // Deny everything else
     // -------------------------------------------------------------------------
     match /{document=**} {

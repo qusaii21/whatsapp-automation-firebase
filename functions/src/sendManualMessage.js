@@ -4,6 +4,7 @@ const admin = require("firebase-admin");
 
 const { WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID } = require("./config");
 const { sendWhatsAppText } = require("./whatsapp");
+const { recordHumanMessageSent } = require("./metrics");
 
 /**
  * HUMAN AGENT MODE — manual send endpoint.
@@ -81,6 +82,9 @@ const sendManualMessage = onRequest(
       });
 
       const db = admin.firestore();
+      // METRICS: one HTTP call -> one send -> one metrics update, same
+      // one-shot posture as this endpoint's own Firestore write below.
+      await recordHumanMessageSent(db);
       const leadRef = db.collection("leads").doc(phone);
 
       const turn = {

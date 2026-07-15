@@ -2129,6 +2129,402 @@ textarea {
   margin-top: 4px;
 }
 
+/* =========================================================================
+   Dashboard
+   ========================================================================= */
+
+.dashboard-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Warnings ─────────────────────────────────────────────────────────── */
+
+.dashboard-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dashboard-warning {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: filter 0.15s ease;
+}
+
+.dashboard-warning[href]:hover,
+a.dashboard-warning:hover {
+  filter: brightness(0.97);
+}
+
+[data-theme="dark"] .dashboard-warning[href]:hover,
+[data-theme="dark"] a.dashboard-warning:hover {
+  filter: brightness(1.15);
+}
+
+.dashboard-warning-warning {
+  background: var(--warm-soft);
+  color: var(--warm);
+  border-color: var(--warm-soft);
+}
+
+.dashboard-warning-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger-soft);
+}
+
+.dashboard-warning-paused {
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  border-color: var(--border);
+}
+
+/* ── KPI cards ────────────────────────────────────────────────────────── */
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+}
+
+.kpi-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kpi-card-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.kpi-card-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.kpi-card-value {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1.25;
+  margin-top: 8px;
+  letter-spacing: -0.01em;
+}
+
+.kpi-card-sub {
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 3px;
+}
+
+/* ── Section cards (chart/table/stat wrappers) ───────────────────────── */
+
+.section-card {
+  padding: 18px 20px 20px;
+}
+
+.section-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.section-card-title {
+  font-size: 14.5px;
+  font-weight: 700;
+}
+
+.section-card-subtitle {
+  font-size: 12px;
+  color: var(--ink-muted);
+  margin-top: 2px;
+}
+
+.section-card-action {
+  flex-shrink: 0;
+}
+
+/* ── Reused stat-tile grid (see .campaign-stat-grid/.campaign-stat-tile
+   above — Usage/AI/Templates sections intentionally reuse those classes
+   rather than declaring near-duplicates) ───────────────────────────────── */
+
+.dashboard-value-muted {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+.dashboard-value-model {
+  font-family: var(--font-mono);
+  font-size: 15px;
+}
+
+/* ── Charts ───────────────────────────────────────────────────────────── */
+
+.dashboard-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.trend-chart-svg {
+  width: 100%;
+  height: 170px;
+  display: block;
+}
+
+.trend-chart-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.trend-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.trend-chart-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.donut-chart {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.donut-chart-svg {
+  flex-shrink: 0;
+}
+
+.donut-chart-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.donut-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.donut-chart-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.donut-chart-legend-value {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+/* ── Recent campaigns table ──────────────────────────────────────────── */
+
+.campaigns-table-name {
+  font-weight: 600;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mono-cell {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* ── Two-column section layout (AI/Templates, Activity/Quick Actions) ──── */
+
+.dashboard-two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+/* ── Activity timeline ───────────────────────────────────────────────── */
+
+.activity-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.activity-timeline-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.activity-timeline-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  color: var(--ink-muted);
+}
+
+.activity-timeline-icon-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.activity-timeline-icon-warm {
+  background: var(--warm-soft);
+  color: var(--warm);
+}
+
+.activity-timeline-icon-cold,
+.activity-timeline-icon-info {
+  background: var(--cold-soft);
+  color: var(--info);
+}
+
+.activity-timeline-icon-muted {
+  background: var(--surface-2);
+  color: var(--ink-faint);
+}
+
+.activity-timeline-body {
+  min-width: 0;
+}
+
+.activity-timeline-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-timeline-time {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  margin-top: 1px;
+  font-family: var(--font-mono);
+}
+
+/* ── Quick actions ────────────────────────────────────────────────────── */
+
+.quick-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.quick-action-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+
+.quick-action-tile:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.quick-action-tile:active {
+  transform: translateY(1px);
+}
+
+.quick-action-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .kpi-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .donut-chart {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 .field-hint-inline {
   font-size: 11px;
   font-weight: 400;

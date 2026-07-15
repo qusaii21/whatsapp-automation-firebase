@@ -18,6 +18,9 @@ const {
   normalizeFurnishing,
   normalizePossessionStatus,
 } = require("./searchNormalization");
+const { UsageAccumulator } = require("./llmUsage");
+
+const AGENT_MODEL = "llama-3.3-70b-versatile";
 
 // Intents that are allowed to trigger a NEW search_properties tool call.
 // Everything else gets the tool withheld entirely (not just discouraged in
@@ -349,11 +352,20 @@ async function runAgent({
     text: conversationHistory[conversationHistory.length - 1]?.text,
   });
 
+  // METRICS: accumulates { model, inputTokens, outputTokens } across every
+  // Groq call this turn makes (classifier + extractor + main agent calls
+  // below), merged into `_meta.llmUsage` on every return path so
+  // processPhoneQueue.js can book the whole turn's token usage/cost in one
+  // recordLlmUsage call — see that file's call site and metrics.js's
+  // recordLlmUsage doc comment.
+  const usageAcc = new UsageAccumulator();
+
   // ---- Step 1: classify intent BEFORE deciding whether search is even
   // an option. This is the actual fix — the tool is withheld structurally
   // for any intent that isn't PROPERTY_SEARCH, not just discouraged in the
   // prompt wording.
-  const intent = await classifyIntent({ conversationHistory, groqApiKey });
+  const { intent, usage: intentUsage } = await classifyIntent({ conversationHistory, groqApiKey });
+  usageAcc.merge([intentUsage]);
   const searchAllowed = SEARCH_ALLOWED_INTENTS.has(intent);
   logger.info("agent: classified intent", { intent, searchAllowed });
 
@@ -374,11 +386,17 @@ async function runAgent({
       .slice(0, -1)
       .reverse()
       .find((turn) => turn.role === "assistant");
-    currentRequirement = await extractCurrentRequirement({
+    const extracted = await extractCurrentRequirement({
       previousAssistantMessage: previousAssistantTurn ? previousAssistantTurn.text : null,
       latestUserMessage: conversationHistory[conversationHistory.length - 1]?.text,
       groqApiKey,
     });
+    usageAcc.merge([extracted.usage]);
+    currentRequirement = {
+      propertyType: extracted.propertyType,
+      listingType: extracted.listingType,
+      purpose: extracted.purpose,
+    };
   }
 
   const llm = new ChatGroq({
@@ -434,6 +452,7 @@ async function runAgent({
     const llmWithTools = llm.bindTools([searchPropertiesTool]);
 
     const firstResponse = await llmWithTools.invoke(messages);
+    usageAcc.add(AGENT_MODEL, firstResponse);
     responseMessages = [...messages, firstResponse];
 
     if (firstResponse.tool_calls && firstResponse.tool_calls.length > 0) {
@@ -490,22 +509,37 @@ async function runAgent({
           propertyType: currentRequirement.propertyType,
           listingType: currentRequirement.listingType,
           startsNewOpportunity: false,
-          _meta: { intent, searchAllowed, toolCalled, searchResultCount: 0, zeroResultShortCircuit: true },
+          _meta: {
+            intent,
+            searchAllowed,
+            toolCalled,
+            searchResultCount: 0,
+            zeroResultShortCircuit: true,
+            llmUsage: usageAcc.toArray(),
+          },
         };
       }
 
       const followUp = await llmWithTools.invoke(responseMessages);
+      usageAcc.add(AGENT_MODEL, followUp);
       responseMessages.push(followUp);
     }
   } else {
     // No tools bound at all — the model physically cannot call search_properties.
     const plainResponse = await llm.invoke(messages);
+    usageAcc.add(AGENT_MODEL, plainResponse);
     responseMessages = [...messages, plainResponse];
   }
 
   logger.info("agent: tool call summary", { toolCalled, toolResult: toolResultLog });
 
-  const structuredLlm = llm.withStructuredOutput(structuredOutputSchema, { name: "agent_output" });
+  const structuredLlm = llm.withStructuredOutput(structuredOutputSchema, {
+    name: "agent_output",
+    // includeRaw: true — see intentClassifier.js's comment on the same
+    // option; needed here so this (usually the largest, priciest) call of
+    // the turn is counted in the turn's total token usage/cost too.
+    includeRaw: true,
+  });
 
   const structuringMessages = [
     new SystemMessage(
@@ -538,7 +572,8 @@ async function runAgent({
     ...responseMessages,
   ];
 
-  const structured = await structuredLlm.invoke(structuringMessages);
+  const { raw: structuringRaw, parsed: structured } = await structuredLlm.invoke(structuringMessages);
+  usageAcc.add(AGENT_MODEL, structuringRaw);
 
   // PHASE 2 - override every business-decision field with ground truth the
   // code already has, instead of trusting the model's self-report. This is
@@ -626,6 +661,7 @@ async function runAgent({
       toolCalled,
       searchResultCount: actualResultIds.length,
       zeroResultShortCircuit: false,
+      llmUsage: usageAcc.toArray(),
     },
   };
 

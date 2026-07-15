@@ -4,6 +4,7 @@ const logger = require("firebase-functions/logger");
 
 const { GRAPH_API_VERSION } = require("./config");
 const { CampaignError } = require("./campaigns");
+const { recordTemplateCreated, recordTemplateStatusChange, recordTemplateSyncBatch } = require("./metrics");
 
 /**
  * WHATSAPP TEMPLATE MANAGEMENT
@@ -313,6 +314,14 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
 
   let added = 0;
   let updated = 0;
+  // METRICS: accumulated across the WHOLE sync (every chunk, every
+  // added/disabled pass below) and written as ONE increment call at the end
+  // — see recordTemplateSyncBatch's own comment for why per-template writes
+  // here would defeat the point of a sync.
+  const metricsDeltas = {};
+  function bumpMetric(path, amount) {
+    metricsDeltas[path] = (metricsDeltas[path] || 0) + amount;
+  }
 
   for (const chunk of chunkArray(fetched, TEMPLATE_CHUNK_SIZE)) {
     const refs = chunk.map((t) => col.doc(t.id));
@@ -328,6 +337,7 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
       const safeNormalized = { ...normalized, components: safeComponents };
 
       if (snap.exists) {
+        const previousStatus = snap.data().status;
         batch.set(
           refs[i],
           {
@@ -338,6 +348,10 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
           { merge: true }
         );
         updated += 1;
+        if (previousStatus !== safeNormalized.status) {
+          if (previousStatus) bumpMetric(`templates.byStatus.${previousStatus}`, -1);
+          bumpMetric(`templates.byStatus.${safeNormalized.status}`, 1);
+        }
       } else {
         batch.set(refs[i], {
           ...safeNormalized,
@@ -347,6 +361,8 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
           lastSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
         added += 1;
+        bumpMetric("templates.total", 1);
+        bumpMetric(`templates.byStatus.${safeNormalized.status}`, 1);
       }
     });
     await batch.commit();
@@ -358,23 +374,29 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
   existingSnap.forEach((docSnap) => {
     const data = docSnap.data();
     if (!fetchedIds.has(data.templateId) && data.status !== "Disabled") {
-      toDisable.push(docSnap.ref);
+      toDisable.push({ ref: docSnap.ref, previousStatus: data.status });
     }
   });
 
   let disabled = 0;
   for (const chunk of chunkArray(toDisable, TEMPLATE_CHUNK_SIZE)) {
     const batch = db.batch();
-    chunk.forEach((ref) => {
+    chunk.forEach(({ ref, previousStatus }) => {
       batch.update(ref, {
         status: "Disabled",
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         lastSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+      if (previousStatus) bumpMetric(`templates.byStatus.${previousStatus}`, -1);
+      bumpMetric("templates.byStatus.Disabled", 1);
     });
     await batch.commit();
     disabled += chunk.length;
   }
+
+  // METRICS: one accumulated increment write for the entire sync, however
+  // many templates it touched — see bumpMetric/recordTemplateSyncBatch above.
+  await recordTemplateSyncBatch(db, metricsDeltas);
 
   const durationMs = Date.now() - startedAt;
   const result = { added, updated, disabled, durationMs, totalFetched: fetched.length };
@@ -416,6 +438,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
   const safeNormalized = { ...normalized, components: safeComponents };
 
   if (snap.exists) {
+    const previousStatus = snap.data().status;
     await ref.set(
       {
         ...safeNormalized,
@@ -424,6 +447,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
       },
       { merge: true }
     );
+    await recordTemplateStatusChange(db, previousStatus, safeNormalized.status);
   } else {
     await ref.set({
       ...safeNormalized,
@@ -432,6 +456,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       lastSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    await recordTemplateCreated(db, safeNormalized.status);
   }
 
   return safeNormalized;
@@ -557,6 +582,10 @@ async function createTemplateOnMeta(db, { wabaId, whatsappToken, payload, variab
   });
 
   logger.info("whatsappTemplates: created template", { templateId: newTemplateId, name: payload.name });
+  // METRICS: this function only ever runs once per createTemplate HTTP call
+  // (a fresh doc.set() above, never a merge onto an existing template), so
+  // this is a one-time event.
+  await recordTemplateCreated(db, normalized.status);
 
   return {
     templateId: newTemplateId,

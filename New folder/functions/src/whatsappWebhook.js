@@ -7,6 +7,7 @@ const { createPhoneQueueTask } = require("./cloudTasks");
 const { enqueueInboxItem, tryAcquireLock } = require("./dispatcher");
 const { sendWhatsAppText } = require("./whatsapp");
 const { applyRecipientStatusUpdate, CampaignError } = require("./campaigns");
+const { recordWhatsAppSystemSend } = require("./metrics");
 
 // PHASE 7 — non-text inputs must never be silently dropped. These are sent
 // directly from the webhook (no LLM call — this is a deterministic
@@ -225,6 +226,7 @@ const whatsappWebhook = onRequest(
                     whatsappToken: WHATSAPP_TOKEN.value(),
                     phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
                   });
+                  await recordWhatsAppSystemSend(db);
                   await db
                     .collection("leads")
                     .doc(phone)

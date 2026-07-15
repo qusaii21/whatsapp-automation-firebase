@@ -1,5 +1,10 @@
 const admin = require("firebase-admin");
 const logger = require("firebase-functions/logger");
+const {
+  recordCampaignCreated,
+  recordCampaignStatusChangeInTx,
+  recordWhatsAppStatusInTx,
+} = require("./metrics");
 
 /**
  * CAMPAIGN DATA MODEL
@@ -15,6 +20,29 @@ const logger = require("firebase-functions/logger");
  * whatsappWebhook.js), so a recipient can be cross-referenced back to
  * `leads/{phone}` (and optionally `leads/{phone}/opportunities/{leadId}` via
  * the `leadId` field) without a lookup table.
+ *
+ * LINEAGE (rootCampaignId / parentCampaignId / runNumber) — added for the
+ * "Reuse Campaign" feature (see duplicateCampaign.js). Every campaign is
+ * still a fully independent, first-class `campaigns/{id}` document with its
+ * own status machine, counters, timeline, and recipients — reuse deliberately
+ * does NOT reset/relaunch an existing campaign in place (see
+ * duplicateCampaign.js's header for why). These three fields exist only to
+ * record, non-destructively, which lineage of reuses a campaign belongs to:
+ *   - `rootCampaignId`: the very first campaign in this lineage. A campaign
+ *     created directly (not via reuse) is its own root. Constant across every
+ *     run in a lineage — this is the field to group by for a rolled-up "all
+ *     runs of this campaign" analytics view (see getCampaignLineage below).
+ *   - `parentCampaignId`: the specific campaign this one was reused FROM, or
+ *     null for an original (non-reused) campaign. Forms a tree, not
+ *     necessarily a straight chain — reusing the same run twice produces two
+ *     children with the same parent.
+ *   - `runNumber`: this campaign's 1-based position in the lineage, assigned
+ *     from the current max across the whole lineage (getNextRunNumber) so it
+ *     stays unique/monotonic across a tree-shaped reuse history, not just a
+ *     linear one.
+ * A campaign created before this field existed simply has no `rootCampaignId`
+ * of its own — duplicateCampaign.js treats that absence as "this campaign IS
+ * a root" (falls back to its own id), so old data doesn't need a migration.
  *
  * THIS FILE IS FOUNDATION ONLY:
  *   - No WhatsApp Cloud API calls (see whatsapp.js for that layer).
@@ -180,7 +208,17 @@ function validateCampaignInput({ name, description, type, templateName, template
   }
 }
 
-function newCampaignDoc({ name, description, type, templateName, templateLanguage }) {
+function newCampaignDoc({
+  name,
+  description,
+  type,
+  templateName,
+  templateLanguage,
+  rootCampaignId,
+  parentCampaignId,
+  runNumber,
+  createdMeta,
+}) {
   return {
     name: name.trim(),
     description: (description || "").trim(),
@@ -188,6 +226,13 @@ function newCampaignDoc({ name, description, type, templateName, templateLanguag
     templateName: templateName.trim(),
     templateLanguage: templateLanguage.trim(),
     status: "draft",
+    // LINEAGE — see this file's header. A campaign created directly (the
+    // normal createCampaign.js flow, which never passes these) is its own
+    // root and run #1 with no parent; duplicateCampaign.js is the only
+    // caller that ever passes non-default values here.
+    rootCampaignId: rootCampaignId || null, // resolved to this doc's own id in createCampaign() below when not provided
+    parentCampaignId: parentCampaignId || null,
+    runNumber: runNumber || 1,
     totalRecipients: 0,
     queuedCount: 0,
     // remainingCount/taskCount are queue-engine bookkeeping (see
@@ -206,7 +251,12 @@ function newCampaignDoc({ name, description, type, templateName, templateLanguag
     deliveredCount: 0,
     readCount: 0,
     failedCount: 0,
-    timeline: [buildTimelineEvent("created")],
+    // AUDIT: the "created" event's meta carries lineage info when this run
+    // came from a reuse (see createdMeta doc below) — e.g. { reusedFrom,
+    // rootCampaignId, runNumber } — so the audit trail is self-explanatory
+    // from the timeline array alone, not just inferable from the
+    // rootCampaignId/parentCampaignId fields elsewhere on the doc.
+    timeline: [buildTimelineEvent("created", createdMeta)],
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
@@ -216,16 +266,46 @@ function newCampaignDoc({ name, description, type, templateName, templateLanguag
  * Creates a new campaign in "draft" status with all counters zeroed.
  * Recipients are added separately via addRecipientsToCampaign.
  *
+ * @param {object} input
+ * @param {string} [input.rootCampaignId] LINEAGE — only ever passed by
+ *   duplicateCampaign.js. Left undefined for a normal new campaign, which
+ *   resolves to `ref.id` below (a fresh campaign is the root of its own
+ *   lineage, run #1).
+ * @param {string} [input.parentCampaignId] LINEAGE — the campaign this one
+ *   was reused from, if any. Only ever passed by duplicateCampaign.js.
+ * @param {number} [input.runNumber] LINEAGE — this campaign's position in
+ *   its lineage. Only ever passed by duplicateCampaign.js.
+ * @param {object} [input.createdMeta] AUDIT — meta attached to the initial
+ *   "created" timeline event. Only ever passed by duplicateCampaign.js.
  * @returns {Promise<{id: string, data: object}>}
  */
 async function createCampaign(db, input) {
   validateCampaignInput(input);
 
   const ref = campaignsCollection(db).doc();
-  const doc = newCampaignDoc(input);
+  const doc = newCampaignDoc({
+    ...input,
+    // A fresh (non-reuse) campaign is the root of its own lineage — ref.id
+    // is already known here (Firestore auto-IDs are generated client-side,
+    // no round trip needed), so this never leaves rootCampaignId null for a
+    // campaign nothing has been reused from yet.
+    rootCampaignId: input.rootCampaignId || ref.id,
+  });
   await ref.set(doc);
 
-  logger.info("campaigns: created campaign", { campaignId: ref.id, type: input.type });
+  // METRICS: one HTTP call -> one campaign doc -> one metrics update. Not
+  // wrapped in the write above's transaction because there isn't one here
+  // (createCampaign is a single, non-retried write, same posture as
+  // sendManualMessage.js) — best-effort, see metrics.js's FAILURE ISOLATION note.
+  await recordCampaignCreated(db);
+
+  logger.info("campaigns: created campaign", {
+    campaignId: ref.id,
+    type: input.type,
+    rootCampaignId: doc.rootCampaignId,
+    parentCampaignId: doc.parentCampaignId,
+    runNumber: doc.runNumber,
+  });
 
   // Return a client-usable copy — serverTimestamp() sentinels aren't
   // resolved until the write lands, so approximate with Date.now() for the
@@ -242,6 +322,70 @@ async function getCampaign(db, campaignId) {
     throw new CampaignError(`Campaign '${campaignId}' not found.`, "not_found");
   }
   return { id: snap.id, data: snap.data() };
+}
+
+/**
+ * LINEAGE — returns the next run number for a given lineage: current max
+ * `runNumber` among every campaign sharing this `rootCampaignId`, plus one.
+ * Deliberately the max across the WHOLE lineage, not `parent.runNumber + 1`
+ * — reuse can form a tree (the same run reused twice, or an older run
+ * reused again after a newer one already exists), and taking the lineage-
+ * wide max is what keeps runNumber unique/monotonic across that tree instead
+ * of colliding whenever a reuse doesn't come from the most recent run.
+ *
+ * Not run inside a transaction: two reuses of the same lineage landing in
+ * the same instant could in principle compute the same next number. That's
+ * a cosmetic ordering-label collision, not a correctness problem — every
+ * run is still its own independent `campaigns/{id}` document with a unique
+ * id, its own counters, and its own recipients, so nothing about sending or
+ * analytics is affected. The same best-effort posture campaignQueue.js's
+ * own bookkeeping counters already use elsewhere in this codebase.
+ */
+async function getNextRunNumber(db, rootCampaignId) {
+  const snap = await campaignsCollection(db)
+    .where("rootCampaignId", "==", rootCampaignId)
+    .orderBy("runNumber", "desc")
+    .limit(1)
+    .get();
+  if (snap.empty) return 1;
+  return (snap.docs[0].data().runNumber || 1) + 1;
+}
+
+/**
+ * LINEAGE — every campaign (run) that shares the given `rootCampaignId`,
+ * ordered oldest-run-first, plus totals rolled up across all of them. This
+ * is what lets "Reuse Campaign" satisfy preserving analytics/history/
+ * delivery metrics ACROSS reuses without merging or resetting any
+ * individual run's own data: each run's counters/timeline/recipients stay
+ * exactly as recorded, and this just sums what's already there.
+ *
+ * Not called by duplicateCampaign.js itself (creating a run doesn't need
+ * its own lineage totals) — this is the read-side building block a future
+ * "all runs of this campaign" analytics view would call.
+ *
+ * @returns {Promise<{runs: Array<{id: string, data: object}>, totals: object}>}
+ */
+async function getCampaignLineage(db, rootCampaignId) {
+  const snap = await campaignsCollection(db)
+    .where("rootCampaignId", "==", rootCampaignId)
+    .orderBy("runNumber", "asc")
+    .get();
+
+  const runs = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() }));
+
+  const totals = runs.reduce(
+    (acc, run) => {
+      acc.totalRecipients += run.data.totalRecipients || 0;
+      acc.sentCount += run.data.sentCount || 0;
+      acc.deliveredCount += run.data.deliveredCount || 0;
+      acc.readCount += run.data.readCount || 0;
+      acc.failedCount += run.data.failedCount || 0;
+      return acc;
+    },
+    { totalRecipients: 0, sentCount: 0, deliveredCount: 0, readCount: 0, failedCount: 0 }
+  );
+
+  return { runs, totals };
 }
 
 function newRecipientDoc({ phone, leadId, templateName }) {
@@ -407,6 +551,7 @@ async function updateCampaignStatus(db, campaignId, newStatus) {
       status: newStatus,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    recordCampaignStatusChangeInTx(tx, db, currentStatus, newStatus);
     return { id: campaignId, previousStatus: currentStatus, status: newStatus };
   });
 }
@@ -476,6 +621,7 @@ async function launchCampaign(db, campaignId, { queuedBy, validationSummary } = 
       ),
       updatedAt: now,
     });
+    recordCampaignStatusChangeInTx(tx, db, "draft", "queued");
 
     return { id: campaignId, previousStatus: "draft", status: "queued" };
   });
@@ -527,6 +673,7 @@ async function pauseCampaign(db, campaignId, { pausedBy } = {}) {
       ),
       updatedAt: now,
     });
+    recordCampaignStatusChangeInTx(tx, db, campaign.status, "paused");
 
     return { id: campaignId, previousStatus: campaign.status, status: "paused" };
   });
@@ -567,6 +714,7 @@ async function resumeCampaign(db, campaignId, { resumedBy } = {}) {
       ),
       updatedAt: now,
     });
+    recordCampaignStatusChangeInTx(tx, db, "paused", target);
 
     return { id: campaignId, previousStatus: "paused", status: target };
   });
@@ -608,6 +756,7 @@ async function cancelCampaign(db, campaignId, { cancelledBy } = {}) {
       ),
       updatedAt: now,
     });
+    recordCampaignStatusChangeInTx(tx, db, campaign.status, "cancelled");
 
     return { id: campaignId, previousStatus: campaign.status, status: "cancelled" };
   });
@@ -667,6 +816,11 @@ async function applyRecipientStatusUpdate(db, campaignId, recipientId, newStatus
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
+    // METRICS: only ever reached for a LEGAL transition (the allowed-list
+    // check above already threw otherwise), so this fires exactly once per
+    // real delivered/read/failed status webhook — "sent" is intentionally
+    // not tracked here, see metrics.js's TRACKED_WHATSAPP_STATUSES comment.
+    recordWhatsAppStatusInTx(tx, db, newStatus);
 
     return { id: recipientId, previousStatus: currentStatus, status: newStatus };
   });
@@ -713,6 +867,7 @@ async function completeCampaignIfFinished(db, campaignId) {
       timeline: admin.firestore.FieldValue.arrayUnion(buildTimelineEvent("completed")),
       updatedAt: now,
     });
+    recordCampaignStatusChangeInTx(tx, db, "sending", "completed");
 
     return { id: campaignId, previousStatus: "sending", status: "completed" };
   });
@@ -736,6 +891,8 @@ module.exports = {
   newRecipientDoc,
   createCampaign,
   getCampaign,
+  getNextRunNumber,
+  getCampaignLineage,
   addRecipientsToCampaign,
   updateCampaignStatus,
   launchCampaign,

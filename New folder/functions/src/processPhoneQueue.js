@@ -22,6 +22,7 @@ const {
   summarizeOpportunityForPrompt,
   hydratePropertiesShared,
 } = require("./opportunities");
+const { recordAIMessageSent, recordWhatsAppSystemSend, recordLlmUsage } = require("./metrics");
 
 /**
  * PHASE 1/4/6/9 — this is the drain loop for one phone's message queue.
@@ -281,6 +282,13 @@ async function processOneMessage({ db, phone, messageId, item }) {
         activeOpportunitySummary: summarizeOpportunityForPrompt(activeOpportunityData),
       });
       await msgRef.set({ agentResult }, { merge: true });
+      // METRICS: guarded by the same `if (!agentResult)` that makes runAgent
+      // itself exactly-once for this inbox item across Cloud Tasks retries —
+      // a retry after this point sees `cached.agentResult` and never
+      // re-enters this block, so this turn's Groq token usage/cost is never
+      // double-counted. See agent.js's `_meta.llmUsage` and metrics.js's
+      // recordLlmUsage.
+      await recordLlmUsage(db, agentResult._meta?.llmUsage);
     }
 
     if (!cached?.textSent) {
@@ -291,6 +299,11 @@ async function processOneMessage({ db, phone, messageId, item }) {
         phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
       });
       await msgRef.set({ textSent: true }, { merge: true });
+      // METRICS: gated by the same `cached?.textSent` check that already
+      // makes the send itself exactly-once across retries/redeliveries of
+      // this messageId — a retry after this point sees `textSent: true` and
+      // never re-enters this block.
+      await recordAIMessageSent(db);
     }
 
     const assistantTurn =
@@ -486,6 +499,10 @@ async function processOneMessage({ db, phone, messageId, item }) {
               phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
             });
             await msgRef.set({ imageSent: true }, { merge: true });
+            // METRICS: a second, distinct WhatsApp Cloud API send for this
+            // same turn — counted in the overall WhatsApp total but not
+            // double-counted as a second "AI message" (see metrics.js).
+            await recordWhatsAppSystemSend(db);
           }
         }
       } catch (imgErr) {

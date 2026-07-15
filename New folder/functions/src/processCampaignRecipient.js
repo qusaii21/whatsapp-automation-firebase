@@ -18,6 +18,7 @@ const {
   CampaignError,
 } = require("./campaigns");
 const { assertTemplateApprovedForCampaign, TemplateError } = require("./whatsappTemplates");
+const { recordWhatsAppSentInTx, recordWhatsAppFailedInTx } = require("./metrics");
 
 /**
  * CAMPAIGN RECIPIENT WORKER
@@ -164,7 +165,7 @@ async function claimRecipient(db, campaignId, recipientId) {
  * if the recipient somehow isn't `queued` anymore by the time this runs —
  * defensive only, since claimRecipient already made this attempt exclusive.
  */
-async function finalizeSuccess(db, campaignId, recipientId, messageId) {
+async function finalizeSuccess(db, campaignId, recipientId, messageId, templateCategory) {
   const rRef = recipientRef(db, campaignId, recipientId);
   const cRef = campaignsCollection(db).doc(campaignId);
 
@@ -195,6 +196,14 @@ async function finalizeSuccess(db, campaignId, recipientId, messageId) {
       sentCount: admin.firestore.FieldValue.increment(1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    // METRICS: reached only when this recipient was still `queued` (the
+    // terminal-state check above), so exactly one send is ever counted per
+    // recipient — claimRecipient's in-flight lock already rules out a
+    // concurrent duplicate reaching here twice. templateCategory (Meta's
+    // Marketing/Utility/Authentication for this campaign's template) is
+    // passed through so the cost is booked at the rate that template
+    // actually bills under — see metrics.js's recordWhatsAppSentInTx.
+    recordWhatsAppSentInTx(tx, db, templateCategory);
   });
 }
 
@@ -237,6 +246,10 @@ async function finalizeFailure(db, campaignId, recipientId, errorMessage, { perm
         failedCount: admin.firestore.FieldValue.increment(1),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+      // METRICS: only the `permanent: true` (terminal) branch counts — a
+      // transient failure below leaves the recipient `queued` for Cloud
+      // Tasks to retry and must not be counted as a failure yet.
+      recordWhatsAppFailedInTx(tx, db);
     } else {
       tx.set(
         rRef,
@@ -297,26 +310,104 @@ function buildComponentParameters(component, lead, recipient) {
 }
 
 /**
- * Builds the Meta `template.components` array for this send: one entry per
- * HEADER/BODY component that actually has `{{...}}` placeholders, each with
- * its own `parameters` array in the order the placeholders appear in that
- * component's text. Components with no placeholders (a plain FOOTER, a
- * static HEADER, BUTTONS) are omitted — Meta only wants `parameters` for
- * components that declare variables.
+ * Builds the Meta `template.components` array for this send.
+ *
+ * Rules:
+ *  - TEXT headers/BODY: include only when there are {{...}} placeholders;
+ *    emit a `parameters` array with one text entry per placeholder.
+ *  - IMAGE/VIDEO/DOCUMENT headers: Meta requires a header component with a
+ *    media parameter at send time even for static templates. We use the
+ *    campaign-level `headerImageUrl` if provided, otherwise fall back to a
+ *    stub URL so the component is present (Meta will reject a missing header
+ *    component outright; a bad URL produces a softer send-time error that is
+ *    still surfaced to the user via the recipient's error field).
+ *  - LOCATION headers: include with location parameters when present in
+ *    the campaign; skip if no coordinates are stored.
+ *  - FOOTER / BUTTONS: never included — Meta does not accept parameters for
+ *    these component types in a send payload.
  */
 function buildTemplateComponents(template, lead, recipient) {
   const components = Array.isArray(template.components) ? template.components : [];
   const result = [];
 
+  // campaign-level media URL (future: could be per-recipient)
+  const headerImageUrl = template.headerImageUrl || null;
+
   for (const component of components) {
     const type = String(component?.type || "").toUpperCase();
-    if (type !== "HEADER" && type !== "BODY") continue;
-    if (typeof component.text !== "string") continue;
+    const format = String(component?.format || "").toUpperCase();
 
-    const parameters = buildComponentParameters(component, lead, recipient);
-    if (!parameters) continue;
+    if (type === "HEADER") {
+      if (format === "TEXT") {
+        // Text header: only include when it has variables
+        if (typeof component.text !== "string") continue;
+        const parameters = buildComponentParameters(component, lead, recipient);
+        if (!parameters) continue;
+        result.push({ type: "header", parameters });
 
-    result.push({ type: type.toLowerCase(), parameters });
+      } else if (format === "IMAGE") {
+        // IMAGE header: Meta requires this component at send time with an
+        // image link parameter. Use the stored campaign URL, or a clear
+        // placeholder that surfaces as a send error rather than a silent skip.
+        const imageLink = headerImageUrl || "";
+        if (!imageLink) {
+          // No URL available — skip so Meta returns a clear API error rather
+          // than a silent wrong-format mismatch. Log for visibility.
+          logger.warn("buildTemplateComponents: IMAGE header skipped — no headerImageUrl on template/campaign", {
+            templateName: template.name,
+          });
+          continue;
+        }
+        result.push({
+          type: "header",
+          parameters: [{ type: "image", image: { link: imageLink } }],
+        });
+
+      } else if (format === "VIDEO") {
+        const videoLink = headerImageUrl || "";
+        if (!videoLink) continue;
+        result.push({
+          type: "header",
+          parameters: [{ type: "video", video: { link: videoLink } }],
+        });
+
+      } else if (format === "DOCUMENT") {
+        const docLink = headerImageUrl || "";
+        if (!docLink) continue;
+        result.push({
+          type: "header",
+          parameters: [{ type: "document", document: { link: docLink } }],
+        });
+
+      } else if (format === "LOCATION") {
+        // Location header: coordinates must come from the campaign
+        const loc = template.headerLocation;
+        if (!loc?.latitude || !loc?.longitude) continue;
+        result.push({
+          type: "header",
+          parameters: [{
+            type: "location",
+            location: {
+              latitude: loc.latitude,
+              longitude: loc.longitude,
+              name: loc.name || "",
+              address: loc.address || "",
+            },
+          }],
+        });
+      }
+      continue;
+    }
+
+    if (type === "BODY") {
+      if (typeof component.text !== "string") continue;
+      const parameters = buildComponentParameters(component, lead, recipient);
+      if (!parameters) continue;
+      result.push({ type: "body", parameters });
+      continue;
+    }
+
+    // FOOTER / BUTTONS — never included in send payload
   }
 
   return result;
@@ -544,7 +635,7 @@ const processCampaignRecipient = onRequest(
         }
       }
 
-      await finalizeSuccess(db, campaignId, recipientId, messageId);
+      await finalizeSuccess(db, campaignId, recipientId, messageId, template.category);
       await checkCampaignCompletion(db, campaignId);
 
       logger.info("processCampaignRecipient: sent", { campaignId, recipientId, messageId, attempts });

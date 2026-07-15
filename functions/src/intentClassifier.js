@@ -2,6 +2,9 @@ const { ChatGroq } = require("@langchain/groq");
 const { z } = require("zod");
 const { HumanMessage, AIMessage, SystemMessage } = require("@langchain/core/messages");
 const logger = require("firebase-functions/logger");
+const { extractUsage } = require("./llmUsage");
+
+const CLASSIFIER_MODEL = "llama-3.1-8b-instant";
 
 // The full set of intents this bot needs to distinguish. Only PROPERTY_SEARCH
 // is allowed to trigger a new search_properties tool call — everything else
@@ -103,21 +106,33 @@ async function classifyIntent({ conversationHistory, groqApiKey }) {
     // Smaller/faster model is enough for a 10-way classification and keeps
     // the extra round trip cheap; swap for the main model if accuracy needs
     // to improve.
-    model: "llama-3.1-8b-instant",
+    model: CLASSIFIER_MODEL,
     temperature: 0,
-  }).withStructuredOutput(intentSchema, { name: "classify_intent" });
+    // includeRaw surfaces the underlying AIMessage (with its token-usage
+    // metadata) alongside the parsed struct — needed so the METRICS ENGINE
+    // (metrics.js's recordLlmUsage, via agent.js's _meta.llmUsage) can book
+    // this call's estimated tokens/cost. Doesn't change classifyIntent's own
+    // return shape below; only the raw message is read here for usage.
+  }).withStructuredOutput(intentSchema, { name: "classify_intent", includeRaw: true });
 
   const messages = [new SystemMessage(CLASSIFIER_PROMPT), ...historyToMessages(conversationHistory)];
 
-  const result = await llm.invoke(messages);
+  const { raw, parsed } = await llm.invoke(messages);
 
   logger.info("intentClassifier: classified", {
-    intent: result.intent,
-    reasoning: result.reasoning,
+    intent: parsed.intent,
+    reasoning: parsed.reasoning,
     lastUserMessage: conversationHistory[conversationHistory.length - 1]?.text,
   });
 
-  return result.intent;
+  // METRICS: token usage for this call, tagged with the model that produced
+  // it — merged by agent.js into the turn's overall `_meta.llmUsage`, then
+  // booked in one write by processPhoneQueue.js via recordLlmUsage. See
+  // llmUsage.js for the raw->usage extraction and metrics.js's IDEMPOTENCY
+  // note for why no dedup is needed here.
+  const usage = { model: CLASSIFIER_MODEL, ...extractUsage(raw) };
+
+  return { intent: parsed.intent, usage };
 }
 
 module.exports = { classifyIntent, INTENTS };

@@ -13,6 +13,7 @@ const {
 } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
 const { createFollowupTask } = require("./cloudTasks");
+const { recordLeadCreated, recordWhatsAppSystemSend } = require("./metrics");
 
 /**
  * Fetches the full field data for a lead from the Graph API and pulls out
@@ -134,11 +135,19 @@ const leadsWebhook = onRequest(
               phone,
               status: "pending",
             };
-            if (!existingSnap.exists) {
+            const isNewLead = !existingSnap.exists;
+            if (isNewLead) {
               leadDoc.createdAt = admin.firestore.FieldValue.serverTimestamp();
               leadDoc.conversationHistory = [];
             }
             await leadRef.set(leadDoc, { merge: true });
+
+            // METRICS: dedup above (processedLeadgenEvents) already makes this
+            // a one-time event per leadgen_id, so this fires exactly once per
+            // real new lead — see metrics.js's IDEMPOTENCY note.
+            if (isNewLead) {
+              await recordLeadCreated(db);
+            }
 
             // 1. Send the WhatsApp welcome template.
             await sendWhatsAppTemplate({
@@ -147,6 +156,7 @@ const leadsWebhook = onRequest(
               whatsappToken: WHATSAPP_TOKEN.value(),
               phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
             });
+            await recordWhatsAppSystemSend(db, "utility");
 
             // 2. Schedule exactly one follow-up check, 24h from now.
             await createFollowupTask(phone, projectId);

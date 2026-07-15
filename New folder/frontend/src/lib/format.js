@@ -88,3 +88,22 @@ export function formatINR(amount, { compact = true } = {}) {
 function trim(n) {
   return Number(n.toFixed(2)).toString();
 }
+
+// Estimated USD costs (AI/WhatsApp spend) are small, fractional numbers
+// (fractions of a cent per message) that still need to read as real money,
+// not round to $0. Below $1 shows 4 decimal places so early-stage usage
+// isn't invisible; $1+ shows the usual 2.
+export function formatUSD(amount) {
+  if (amount == null || Number.isNaN(Number(amount))) return "—";
+  const n = Number(amount);
+  const decimals = Math.abs(n) < 1 ? 4 : 2;
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+}
+
+// Whole-number formatting for counters (messages, tokens, credits) — always
+// comma-grouped, no decimals, "—" for missing data so a genuinely-untracked
+// number never renders as a misleading 0.
+export function formatCount(amount) {
+  if (amount == null || Number.isNaN(Number(amount))) return "—";
+  return Math.round(Number(amount)).toLocaleString("en-US");
+}

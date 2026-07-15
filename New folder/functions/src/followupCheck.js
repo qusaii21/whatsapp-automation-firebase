@@ -9,6 +9,7 @@ const {
   FOLLOWUP_CLAIM_STALE_MS,
 } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
+const { recordWhatsAppSystemSend } = require("./metrics");
 
 /**
  * Called exactly once, 24 hours after a lead was created, by the Cloud Task
@@ -96,6 +97,10 @@ const followupCheck = onRequest(
           whatsappToken: WHATSAPP_TOKEN.value(),
           phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
         });
+        // METRICS: only reached after winning the "sending_followup" claim
+        // transaction above, which is what makes this exactly-once across
+        // Cloud Tasks redeliveries — see that transaction's own comment.
+        await recordWhatsAppSystemSend(db, "utility");
 
         await leadRef.update({ status: "followed_up" });
         logger.info("followupCheck: sent follow-up", { phone });

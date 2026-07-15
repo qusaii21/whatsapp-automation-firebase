@@ -3,6 +3,7 @@ const logger = require("firebase-functions/logger");
 
 const { normalizePropertyType, normalizeListingType, normalizePurpose } = require("./searchNormalization");
 const { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES } = require("./propertyEnums");
+const { recordOpportunityCreated } = require("./metrics");
 
 /**
  * CUSTOMER -> OPPORTUNITIES MODEL
@@ -305,6 +306,11 @@ async function resolveActiveOpportunity({
       previousOpportunityId: activeOpportunityId || null,
       seeded: Boolean(seedFromLead),
     });
+    // METRICS: this branch only ever runs once per opportunity, since the
+    // caller (processPhoneQueue.js) only calls resolveActiveOpportunity when
+    // `!cached?.opportunityId`, then immediately caches the result on
+    // msgRef — see that file's own comment on this.
+    await recordOpportunityCreated(db);
     return {
       ref: newRef,
       id: newRef.id,

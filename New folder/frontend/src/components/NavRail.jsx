@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { MessageCircle, Users, Building2, BarChart3, Megaphone, FileText, Moon, Sun } from "lucide-react";
+import { LayoutDashboard, MessageCircle, Users, Building2, BarChart3, Megaphone, FileText, Moon, Sun } from "lucide-react";
 
 const LINKS = [
-  { to: "/", label: "Chats", icon: MessageCircle, end: true },
+  { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
+  { to: "/chats", label: "Chats", icon: MessageCircle },
   { to: "/leads", label: "Smart Leads", icon: Users },
   { to: "/properties", label: "Properties", icon: Building2 },
   { to: "/campaigns", label: "Campaigns", icon: Megaphone },

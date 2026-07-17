@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Ban, Copy, RefreshCw, ShieldAlert } from "lucide-react";
-import { functionsBaseUrl } from "../lib/functions.js";
+import { authedFetch } from "../lib/functions.js";
 
 /**
  * CAMPAIGN ACTIONS
@@ -57,7 +57,7 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
     setCancelling(true);
     setCancelError(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/cancelCampaign`, {
+      const res = await authedFetch("/cancelCampaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ campaignId, cancelledBy: "web" }),
@@ -79,7 +79,7 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
     setDuplicating(true);
     setDuplicateError(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/duplicateCampaign`, {
+      const res = await authedFetch("/duplicateCampaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ campaignId }),
@@ -104,7 +104,7 @@ export default function CampaignActions({ campaignId, campaign, onNavigate }) {
     setRetryError(null);
     setRetryResult(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/retryCampaignDispatch`, {
+      const res = await authedFetch("/retryCampaignDispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ campaignId }),

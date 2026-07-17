@@ -5,6 +5,7 @@ const {
   recordCampaignStatusChangeInTx,
   recordWhatsAppStatusInTx,
 } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * CAMPAIGN DATA MODEL
@@ -170,12 +171,12 @@ function buildTimelineEvent(type, meta) {
   return event;
 }
 
-function campaignsCollection(db) {
-  return db.collection("campaigns");
+function campaignsCollection(db, agencyId) {
+  return agencyCollection(db, agencyId, "campaigns");
 }
 
-function recipientsCollection(db, campaignId) {
-  return campaignsCollection(db).doc(campaignId).collection("recipients");
+function recipientsCollection(db, agencyId, campaignId) {
+  return campaignsCollection(db, agencyId).doc(campaignId).collection("recipients");
 }
 
 // Same normalization WhatsApp Cloud API / leadsWebhook.js already rely on:
@@ -279,10 +280,10 @@ function newCampaignDoc({
  *   "created" timeline event. Only ever passed by duplicateCampaign.js.
  * @returns {Promise<{id: string, data: object}>}
  */
-async function createCampaign(db, input) {
+async function createCampaign(db, agencyId, input) {
   validateCampaignInput(input);
 
-  const ref = campaignsCollection(db).doc();
+  const ref = campaignsCollection(db, agencyId).doc();
   const doc = newCampaignDoc({
     ...input,
     // A fresh (non-reuse) campaign is the root of its own lineage — ref.id
@@ -297,7 +298,7 @@ async function createCampaign(db, input) {
   // wrapped in the write above's transaction because there isn't one here
   // (createCampaign is a single, non-retried write, same posture as
   // sendManualMessage.js) — best-effort, see metrics.js's FAILURE ISOLATION note.
-  await recordCampaignCreated(db);
+  await recordCampaignCreated(db, agencyId);
 
   logger.info("campaigns: created campaign", {
     campaignId: ref.id,
@@ -316,8 +317,8 @@ async function createCampaign(db, input) {
   };
 }
 
-async function getCampaign(db, campaignId) {
-  const snap = await campaignsCollection(db).doc(campaignId).get();
+async function getCampaign(db, agencyId, campaignId) {
+  const snap = await campaignsCollection(db, agencyId).doc(campaignId).get();
   if (!snap.exists) {
     throw new CampaignError(`Campaign '${campaignId}' not found.`, "not_found");
   }
@@ -341,8 +342,8 @@ async function getCampaign(db, campaignId) {
  * analytics is affected. The same best-effort posture campaignQueue.js's
  * own bookkeeping counters already use elsewhere in this codebase.
  */
-async function getNextRunNumber(db, rootCampaignId) {
-  const snap = await campaignsCollection(db)
+async function getNextRunNumber(db, agencyId, rootCampaignId) {
+  const snap = await campaignsCollection(db, agencyId)
     .where("rootCampaignId", "==", rootCampaignId)
     .orderBy("runNumber", "desc")
     .limit(1)
@@ -365,8 +366,8 @@ async function getNextRunNumber(db, rootCampaignId) {
  *
  * @returns {Promise<{runs: Array<{id: string, data: object}>, totals: object}>}
  */
-async function getCampaignLineage(db, rootCampaignId) {
-  const snap = await campaignsCollection(db)
+async function getCampaignLineage(db, agencyId, rootCampaignId) {
+  const snap = await campaignsCollection(db, agencyId)
     .where("rootCampaignId", "==", rootCampaignId)
     .orderBy("runNumber", "asc")
     .get();
@@ -433,12 +434,12 @@ function chunkArray(items, size) {
  * @param {Array<{phone: string, leadId?: string}>} recipients
  * @returns {Promise<{added: number, skippedDuplicates: number, skippedInvalid: number, totalRecipients: number}>}
  */
-async function addRecipientsToCampaign(db, campaignId, recipients) {
+async function addRecipientsToCampaign(db, agencyId, campaignId, recipients) {
   if (!Array.isArray(recipients) || recipients.length === 0) {
     throw new CampaignError("'recipients' must be a non-empty array.");
   }
 
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
   const campaignSnap = await campaignRef.get();
   if (!campaignSnap.exists) {
     throw new CampaignError(`Campaign '${campaignId}' not found.`, "not_found");
@@ -466,7 +467,7 @@ async function addRecipientsToCampaign(db, campaignId, recipients) {
     candidates.push({ phone, leadId: r.leadId || null });
   }
 
-  const col = recipientsCollection(db, campaignId);
+  const col = recipientsCollection(db, agencyId, campaignId);
   let added = 0;
   let skippedDuplicates = 0;
 
@@ -527,12 +528,12 @@ async function addRecipientsToCampaign(db, campaignId, recipients) {
  * queue/send/complete feature will call through, so that logic never has to
  * re-derive "is this transition legal" itself.
  */
-async function updateCampaignStatus(db, campaignId, newStatus) {
+async function updateCampaignStatus(db, agencyId, campaignId, newStatus) {
   if (!CAMPAIGN_STATUSES.includes(newStatus)) {
     throw new CampaignError(`'${newStatus}' is not a valid campaign status.`);
   }
 
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -551,7 +552,7 @@ async function updateCampaignStatus(db, campaignId, newStatus) {
       status: newStatus,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    recordCampaignStatusChangeInTx(tx, db, currentStatus, newStatus);
+    recordCampaignStatusChangeInTx(tx, db, agencyId, currentStatus, newStatus);
     return { id: campaignId, previousStatus: currentStatus, status: newStatus };
   });
 }
@@ -581,8 +582,8 @@ async function updateCampaignStatus(db, campaignId, newStatus) {
  * @param {object} [opts.validationSummary] Snapshot of what was validated,
  *   for display on the campaign detail page.
  */
-async function launchCampaign(db, campaignId, { queuedBy, validationSummary } = {}) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function launchCampaign(db, agencyId, campaignId, { queuedBy, validationSummary } = {}) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -621,7 +622,7 @@ async function launchCampaign(db, campaignId, { queuedBy, validationSummary } = 
       ),
       updatedAt: now,
     });
-    recordCampaignStatusChangeInTx(tx, db, "draft", "queued");
+    recordCampaignStatusChangeInTx(tx, db, agencyId, "draft", "queued");
 
     return { id: campaignId, previousStatus: "draft", status: "queued" };
   });
@@ -645,8 +646,8 @@ async function launchCampaign(db, campaignId, { queuedBy, validationSummary } = 
  * makes pausing mid-dispatch actually take effect within one loop
  * iteration.
  */
-async function pauseCampaign(db, campaignId, { pausedBy } = {}) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function pauseCampaign(db, agencyId, campaignId, { pausedBy } = {}) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -673,7 +674,7 @@ async function pauseCampaign(db, campaignId, { pausedBy } = {}) {
       ),
       updatedAt: now,
     });
-    recordCampaignStatusChangeInTx(tx, db, campaign.status, "paused");
+    recordCampaignStatusChangeInTx(tx, db, agencyId, campaign.status, "paused");
 
     return { id: campaignId, previousStatus: campaign.status, status: "paused" };
   });
@@ -686,8 +687,8 @@ async function pauseCampaign(db, campaignId, { pausedBy } = {}) {
  * paused campaign should have it) rather than throwing, since "queued" is
  * the safer of the two possible targets to resume into.
  */
-async function resumeCampaign(db, campaignId, { resumedBy } = {}) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function resumeCampaign(db, agencyId, campaignId, { resumedBy } = {}) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -714,7 +715,7 @@ async function resumeCampaign(db, campaignId, { resumedBy } = {}) {
       ),
       updatedAt: now,
     });
-    recordCampaignStatusChangeInTx(tx, db, "paused", target);
+    recordCampaignStatusChangeInTx(tx, db, agencyId, "paused", target);
 
     return { id: campaignId, previousStatus: "paused", status: target };
   });
@@ -728,8 +729,8 @@ async function resumeCampaign(db, campaignId, { resumedBy } = {}) {
  * (campaignControl.js) performs after this succeeds, exactly like
  * launchCampaign.js keeps the template-approval check outside campaigns.js.
  */
-async function cancelCampaign(db, campaignId, { cancelledBy } = {}) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function cancelCampaign(db, agencyId, campaignId, { cancelledBy } = {}) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -756,7 +757,7 @@ async function cancelCampaign(db, campaignId, { cancelledBy } = {}) {
       ),
       updatedAt: now,
     });
-    recordCampaignStatusChangeInTx(tx, db, campaign.status, "cancelled");
+    recordCampaignStatusChangeInTx(tx, db, agencyId, campaign.status, "cancelled");
 
     return { id: campaignId, previousStatus: campaign.status, status: "cancelled" };
   });
@@ -775,13 +776,13 @@ async function cancelCampaign(db, campaignId, { cancelledBy } = {}) {
  *
  * @param {string} [error] Required when newStatus === "failed".
  */
-async function applyRecipientStatusUpdate(db, campaignId, recipientId, newStatus, { error, messageId } = {}) {
+async function applyRecipientStatusUpdate(db, agencyId, campaignId, recipientId, newStatus, { error, messageId } = {}) {
   if (!RECIPIENT_STATUSES.includes(newStatus)) {
     throw new CampaignError(`'${newStatus}' is not a valid recipient status.`);
   }
 
-  const recipientRef = recipientsCollection(db, campaignId).doc(recipientId);
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+  const recipientRef = recipientsCollection(db, agencyId, campaignId).doc(recipientId);
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(recipientRef);
@@ -820,7 +821,7 @@ async function applyRecipientStatusUpdate(db, campaignId, recipientId, newStatus
     // check above already threw otherwise), so this fires exactly once per
     // real delivered/read/failed status webhook — "sent" is intentionally
     // not tracked here, see metrics.js's TRACKED_WHATSAPP_STATUSES comment.
-    recordWhatsAppStatusInTx(tx, db, newStatus);
+    recordWhatsAppStatusInTx(tx, db, agencyId, newStatus);
 
     return { id: recipientId, previousStatus: currentStatus, status: newStatus };
   });
@@ -844,8 +845,8 @@ async function applyRecipientStatusUpdate(db, campaignId, recipientId, newStatus
  * still update later via webhook without the campaign itself needing to
  * stay "sending".
  */
-async function completeCampaignIfFinished(db, campaignId) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function completeCampaignIfFinished(db, agencyId, campaignId) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(campaignRef);
@@ -867,7 +868,7 @@ async function completeCampaignIfFinished(db, campaignId) {
       timeline: admin.firestore.FieldValue.arrayUnion(buildTimelineEvent("completed")),
       updatedAt: now,
     });
-    recordCampaignStatusChangeInTx(tx, db, "sending", "completed");
+    recordCampaignStatusChangeInTx(tx, db, agencyId, "sending", "completed");
 
     return { id: campaignId, previousStatus: "sending", status: "completed" };
   });

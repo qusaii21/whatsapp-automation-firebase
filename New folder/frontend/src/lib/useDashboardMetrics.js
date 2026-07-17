@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { collection, doc, documentId, onSnapshot, query, where } from "firebase/firestore";
-import { db } from "../firebase.js";
+import { collection, documentId, onSnapshot, query, where } from "firebase/firestore";
+import { metricsDashboardDoc, metricsDailyDoc, metricsMonthlyDoc, agencyCollection } from "./agencyPath.js";
 import { dayKey, lastNDayKeys, monthKey } from "./metricsPeriods.js";
 
 /**
@@ -19,7 +19,7 @@ import { dayKey, lastNDayKeys, monthKey } from "./metricsPeriods.js";
  * Templates.jsx, Insights.jsx). Four listeners total, each on a single doc
  * or a 14-doc bound — not a scan of any collection.
  */
-export function useDashboardMetrics() {
+export function useDashboardMetrics(agencyId) {
   const [allTime, setAllTime] = useState(null);
   const [allTimeLoading, setAllTimeLoading] = useState(true);
 
@@ -33,8 +33,13 @@ export function useDashboardMetrics() {
   const [seriesLoading, setSeriesLoading] = useState(true);
 
   useEffect(() => {
+    if (!agencyId) {
+      setAllTime(null);
+      setAllTimeLoading(true);
+      return undefined;
+    }
     const unsub = onSnapshot(
-      doc(db, "metrics", "dashboard"),
+      metricsDashboardDoc(agencyId),
       (snap) => {
         setAllTime(snap.exists() ? snap.data() : {});
         setAllTimeLoading(false);
@@ -42,11 +47,16 @@ export function useDashboardMetrics() {
       () => setAllTimeLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
+    if (!agencyId) {
+      setToday(null);
+      setTodayLoading(true);
+      return undefined;
+    }
     const unsub = onSnapshot(
-      doc(db, "metricsDaily", dayKey()),
+      metricsDailyDoc(agencyId, dayKey()),
       (snap) => {
         setToday(snap.exists() ? snap.data() : {});
         setTodayLoading(false);
@@ -54,11 +64,16 @@ export function useDashboardMetrics() {
       () => setTodayLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
+    if (!agencyId) {
+      setMonth(null);
+      setMonthLoading(true);
+      return undefined;
+    }
     const unsub = onSnapshot(
-      doc(db, "metricsMonthly", monthKey()),
+      metricsMonthlyDoc(agencyId, monthKey()),
       (snap) => {
         setMonth(snap.exists() ? snap.data() : {});
         setMonthLoading(false);
@@ -66,11 +81,16 @@ export function useDashboardMetrics() {
       () => setMonthLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
+    if (!agencyId) {
+      setSeries([]);
+      setSeriesLoading(true);
+      return undefined;
+    }
     const keys = lastNDayKeys(14);
-    const q = query(collection(db, "metricsDaily"), where(documentId(), "in", keys));
+    const q = query(agencyCollection(agencyId, "metricsDaily"), where(documentId(), "in", keys));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -85,7 +105,7 @@ export function useDashboardMetrics() {
       () => setSeriesLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   return {
     allTime: allTime || {},

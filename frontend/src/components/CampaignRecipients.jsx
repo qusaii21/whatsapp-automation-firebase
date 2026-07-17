@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { collection, onSnapshot } from "firebase/firestore";
+import { onSnapshot } from "firebase/firestore";
 import { ClipboardPaste, FileUp, Users, SlidersHorizontal, Search, Upload } from "lucide-react";
-import { db } from "../firebase.js";
-import { functionsBaseUrl } from "../lib/functions.js";
+import { leadsCollection, campaignRecipientsCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
+import { authedFetch } from "../lib/functions.js";
 import { formatDateTime, sortByRecency } from "../lib/format.js";
 import { PROPERTY_TYPES } from "../constants/propertyEnums.js";
 
@@ -369,14 +370,20 @@ function CsvUploadTab({ onSubmit, submitting, existingPhones }) {
 // --- Tab 3: CRM Customers ----------------------------------------------------
 
 function CrmCustomersTab({ onSubmit, submitting, existingPhones }) {
+  const { agencyId } = useAuth();
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(() => new Set());
 
   useEffect(() => {
+    if (!agencyId) {
+      setLeads([]);
+      setLoading(true);
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "leads"),
+      leadsCollection(agencyId),
       (snapshot) => {
         setLeads(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
         setLoading(false);
@@ -384,7 +391,7 @@ function CrmCustomersTab({ onSubmit, submitting, existingPhones }) {
       () => setLoading(false)
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -612,6 +619,7 @@ function RecipientList({ recipients, leadsByPhone, loading }) {
 // --- Main component -----------------------------------------------------
 
 export default function CampaignRecipients({ campaignId, campaign }) {
+  const { agencyId } = useAuth();
   const [activeTab, setActiveTab] = useState("paste");
   const [recipients, setRecipients] = useState([]);
   const [loadingRecipients, setLoadingRecipients] = useState(true);
@@ -622,8 +630,13 @@ export default function CampaignRecipients({ campaignId, campaign }) {
   const isDraft = campaign?.status === "draft";
 
   useEffect(() => {
+    if (!agencyId) {
+      setRecipients([]);
+      setLoadingRecipients(true);
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "campaigns", campaignId, "recipients"),
+      campaignRecipientsCollection(agencyId, campaignId),
       (snapshot) => {
         setRecipients(sortByRecency(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })), "createdAt"));
         setLoadingRecipients(false);
@@ -631,14 +644,18 @@ export default function CampaignRecipients({ campaignId, campaign }) {
       () => setLoadingRecipients(false)
     );
     return unsubscribe;
-  }, [campaignId]);
+  }, [agencyId, campaignId]);
 
   // Only needed to show a name next to a phone number in the recipient list
   // (recipient docs don't store a name). Reuses the same `leads` collection
   // the CRM Customers tab already reads.
   useEffect(() => {
+    if (!agencyId) {
+      setLeadsByPhone(new Map());
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "leads"),
+      leadsCollection(agencyId),
       (snapshot) => {
         const map = new Map();
         snapshot.docs.forEach((d) => map.set(d.id, { id: d.id, ...d.data() }));
@@ -647,7 +664,7 @@ export default function CampaignRecipients({ campaignId, campaign }) {
       () => {}
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -660,7 +677,7 @@ export default function CampaignRecipients({ campaignId, campaign }) {
   async function addRecipients(list) {
     setSubmitting(true);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/addCampaignRecipients`, {
+      const res = await authedFetch("/addCampaignRecipients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ campaignId, recipients: list }),

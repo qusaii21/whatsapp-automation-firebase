@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Send } from "lucide-react";
+import { authedFetch } from "../lib/functions.js";
 
 /**
  * HUMAN AGENT MODE — manual message composer.
@@ -14,10 +15,6 @@ import { Send } from "lucide-react";
  * optimistically render it itself, so there's exactly one source of truth
  * for what actually got delivered.
  */
-function functionsBaseUrl() {
-  const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
-  return `https://us-central1-${projectId}.cloudfunctions.net`;
-}
 
 export default function MessageComposer({ phone }) {
   const [text, setText] = useState("");
@@ -31,7 +28,7 @@ export default function MessageComposer({ phone }) {
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/sendManualMessage`, {
+      const res = await authedFetch("/sendManualMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone, text: trimmed }),

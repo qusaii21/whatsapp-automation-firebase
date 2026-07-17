@@ -3,105 +3,213 @@ rules_version = '2';
 // -----------------------------------------------------------------------------
 // IMPORTANT SECURITY NOTE
 // -----------------------------------------------------------------------------
-// This CRM currently has no Firebase Authentication.
-// The React frontend talks directly to Firestore.
+// This CRM still has no Firebase Authentication (that is a separate, later
+// phase). The React frontend talks directly to Firestore.
 //
-// Cloud Functions use the Admin SDK and therefore bypass these rules.
+// Cloud Functions use the Admin SDK and therefore bypass these rules entirely
+// — everything below only governs the browser's direct Firestore access.
 //
-// These rules intentionally allow unrestricted access for internal development.
-// Before production, replace these with authenticated, role-based rules.
+// MULTI-TENANCY: every collection that used to live at the root (leads,
+// campaigns, properties, whatsappTemplates, metrics...) now lives nested
+// under `agencies/{agencyId}/...` (see functions/src/tenancy.js for the full
+// path map). These rules mirror that nesting one-for-one, with the exact
+// same per-collection read/write posture the previous, flat rules already
+// had — nothing about WHO can read/write which collection changed, only
+// WHERE that collection now lives.
+//
+// FUTURE AUTH: `isAgencyMember(agencyId)` below is the single choke point
+// every tenant-scoped match block already calls through. Right now it always
+// returns true (no auth provider exists yet), which is why this still reads
+// as "open" — but every rule in this file is already scoped to a specific
+// `{agencyId}` path segment, so the day Firebase Auth + custom claims land,
+// tightening isolation is a ONE-LINE change to this single function (e.g.
+// `request.auth != null && request.auth.token.agencyId == agencyId`) rather
+// than a rewrite of every match block below.
 // -----------------------------------------------------------------------------
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // -------------------------------------------------------------------------
-    // Leads
-    // -------------------------------------------------------------------------
-    match /leads/{phone} {
-
-      // Lead document
-      allow read, write: if true;
-
-      // Opportunities subcollection
-      match /opportunities/{opportunityId} {
-        allow read, write: if true;
-      }
+    // Single choke point for "does the caller belong to this agency" — see
+    // the FUTURE AUTH note above. Intentionally unconditional today.
+    function isAgencyMember(agencyId) {
+      return true;
     }
 
     // -------------------------------------------------------------------------
-    // Properties
+    // Agencies — the tenant root. Profile/settings/credits/subscription are
+    // fixed-id docs (see tenancy.js's ensureAgencyDoc); members is a real
+    // subcollection. All read-only from the client for now: agency
+    // provisioning and every mutation to these docs is admin-SDK-only until
+    // a dedicated agency-settings feature (and real auth) exists — a stray
+    // client write here could otherwise silently change another agency's
+    // subscription/credits state with nothing to stop it pre-auth.
     // -------------------------------------------------------------------------
-    match /properties/{propertyId} {
-      allow read, write: if true;
-    }
-
-    // -------------------------------------------------------------------------
-    // Campaigns
-    // -------------------------------------------------------------------------
-    // Unlike leads/properties above, this is NOT opened up for unrestricted
-    // client writes, dev-mode convenience or not. Campaign counters
-    // (totalRecipients/queuedCount/sentCount/...) are only ever safe to
-    // mutate through the transactional helpers in functions/src/campaigns.js
-    // (Cloud Functions use the Admin SDK and bypass these rules entirely), so
-    // a stray client-side write here could desync a counter from the
-    // recipient docs it's derived from with no way to detect it. Reads are
-    // left open so a future dashboard can render campaign/recipient status
-    // directly from Firestore, matching how the rest of the CRM works.
-    match /campaigns/{campaignId} {
-      allow read: if true;
+    match /agencies/{agencyId} {
+      allow read: if isAgencyMember(agencyId);
       allow write: if false;
 
-      match /recipients/{recipientId} {
-        allow read: if true;
+      match /profile/{docId} {
+        allow read: if isAgencyMember(agencyId);
         allow write: if false;
       }
+      match /settings/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /credits/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /subscription/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /members/{memberId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // WhatsApp integration (agencies/{agencyId}/integrations/whatsapp)
+      // -----------------------------------------------------------------------
+      // Holds the agency's encrypted Meta WhatsApp access token and
+      // connection metadata (see functions/src/whatsappCredentials.js).
+      // NEVER client-readable, even to the agency's own owner — the
+      // Settings page gets connection status exclusively through the
+      // getIntegrationStatus Cloud Function, which returns a hand-picked,
+      // credential-free projection. Every write to this doc goes through
+      // connectWhatsApp/disconnectWhatsApp/checkWhatsAppHealth (Admin SDK)
+      // or the migration script, never a direct client write.
+      match /integrations/{docId} {
+        allow read: if false;
+        allow write: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // Leads (agencies/{agencyId}/leads/{phone})
+      // -----------------------------------------------------------------------
+      match /leads/{phone} {
+        allow read, write: if isAgencyMember(agencyId);
+
+        match /opportunities/{opportunityId} {
+          allow read, write: if isAgencyMember(agencyId);
+        }
+
+        // Inbox (dispatcher queue) and deadLetters are internal Cloud
+        // Functions machinery (dispatcher.js / processPhoneQueue.js) — never
+        // read or written by the browser, same as the previous flat rules
+        // implicitly denied these via the catch-all at the bottom.
+        match /inbox/{messageId} {
+          allow read, write: if false;
+        }
+        match /deadLetters/{messageId} {
+          allow read: if isAgencyMember(agencyId);
+          allow write: if false;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Properties (agencies/{agencyId}/properties/{propertyId})
+      // -----------------------------------------------------------------------
+      match /properties/{propertyId} {
+        allow read, write: if isAgencyMember(agencyId);
+      }
+
+      // -----------------------------------------------------------------------
+      // Campaigns (agencies/{agencyId}/campaigns/{campaignId})
+      // -----------------------------------------------------------------------
+      // Unlike leads/properties above, this is NOT opened up for unrestricted
+      // client writes. Campaign counters (totalRecipients/queuedCount/
+      // sentCount/...) are only ever safe to mutate through the transactional
+      // helpers in functions/src/campaigns.js (Admin SDK, bypasses these
+      // rules), so a stray client-side write here could desync a counter from
+      // the recipient docs it's derived from with no way to detect it. Reads
+      // are left open so a future dashboard can render campaign/recipient
+      // status directly from Firestore, matching how the rest of the CRM
+      // works.
+      match /campaigns/{campaignId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+
+        match /recipients/{recipientId} {
+          allow read: if isAgencyMember(agencyId);
+          allow write: if false;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // WhatsApp Templates (agencies/{agencyId}/whatsappTemplates/{templateId})
+      // -----------------------------------------------------------------------
+      // Same posture as campaigns above: this is a mirror of Meta's approved
+      // template catalog, only ever written by whatsappTemplates.js (Admin
+      // SDK, bypasses these rules) so a stray client write can never desync
+      // it from what Meta actually has approved. Reads are open so the
+      // Templates page and the Campaign-creation template picker can read
+      // live via onSnapshot.
+      match /whatsappTemplates/{templateId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // Dashboard Metrics (agencies/{agencyId}/metrics/dashboard, etc.)
+      // -----------------------------------------------------------------------
+      // Same posture as campaigns/whatsappTemplates above: these are running
+      // counters moved ONLY by FieldValue.increment() calls inside
+      // functions/src/metrics.js (Admin SDK, bypasses these rules entirely).
+      // A stray client write here could desync a counter from the events
+      // it's derived from with no way to detect or repair it, so writes are
+      // closed. Reads are open so the dashboard can render every counter
+      // from a single get()/onSnapshot() on these docs, matching how the
+      // rest of the CRM already reads live from Firestore.
+      match /metrics/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /metricsDaily/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /metricsWeekly/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+      match /metricsMonthly/{docId} {
+        allow read: if isAgencyMember(agencyId);
+        allow write: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // Internal Cloud Functions machinery — never touched by the browser.
+      // (Dispatcher/campaign-dispatch locks, and the two webhook-dedupe
+      // collections. See dispatcher.js, campaignQueue.js, leadsWebhook.js,
+      // whatsappWebhook.js.)
+      // -----------------------------------------------------------------------
+      match /dispatcherLocks/{phone} {
+        allow read, write: if false;
+      }
+      match /campaignDispatchLocks/{campaignId} {
+        allow read, write: if false;
+      }
+      match /processedMessages/{messageId} {
+        allow read, write: if false;
+      }
+      match /processedLeadgenEvents/{leadgenId} {
+        allow read, write: if false;
+      }
     }
 
     // -------------------------------------------------------------------------
-    // WhatsApp Templates
+    // Agency routing index (agencyRouting/{routingKey}) — the ONE genuinely
+    // global, cross-tenant collection (see tenancy.js's header). It holds no
+    // lead/campaign/message content, only `{ agencyId }` keyed by a Facebook
+    // Page ID or WhatsApp phone_number_id, and is read/written exclusively by
+    // the two Meta webhook handlers via the Admin SDK — the browser has no
+    // legitimate reason to ever read or write it.
     // -------------------------------------------------------------------------
-    // Same posture as campaigns above: this is a mirror of Meta's approved
-    // template catalog, only ever written by syncTemplates.js (Admin SDK,
-    // bypasses these rules) so a stray client write can never desync it from
-    // what Meta actually has approved. Reads are open so the Templates page
-    // and the Campaign-creation template picker can read live via onSnapshot.
-    match /whatsappTemplates/{templateId} {
-      allow read: if true;
-      allow write: if false;
-    }
-
-    // -------------------------------------------------------------------------
-    // Dashboard Metrics
-    // -------------------------------------------------------------------------
-    // Same posture as campaigns/whatsappTemplates above: `metrics/dashboard`
-    // is a set of running counters moved ONLY by FieldValue.increment() calls
-    // inside functions/src/metrics.js (Cloud Functions use the Admin SDK and
-    // bypass these rules entirely). A stray client write here could desync a
-    // counter from the events it's derived from with no way to detect or
-    // repair it, so writes are closed. Reads are open so the dashboard can
-    // render every counter from a single `get()`/`onSnapshot()` on this one
-    // doc, matching how the rest of the CRM already reads live from Firestore.
-    match /metrics/{docId} {
-      allow read: if true;
-      allow write: if false;
-    }
-
-    // Daily / Weekly / Monthly rollups of the same counters as
-    // `metrics/dashboard` above (see functions/src/metrics.js's periodRefs/
-    // dayKey/isoWeekKey/monthKey) — one doc per calendar day / ISO week /
-    // calendar month, same write-closed/read-open posture and same reason.
-    match /metricsDaily/{docId} {
-      allow read: if true;
-      allow write: if false;
-    }
-    match /metricsWeekly/{docId} {
-      allow read: if true;
-      allow write: if false;
-    }
-    match /metricsMonthly/{docId} {
-      allow read: if true;
-      allow write: if false;
+    match /agencyRouting/{routingKey} {
+      allow read, write: if false;
     }
 
     // -------------------------------------------------------------------------

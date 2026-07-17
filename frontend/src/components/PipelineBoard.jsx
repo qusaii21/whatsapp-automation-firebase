@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { doc, updateDoc } from "firebase/firestore";
-import { db } from "../firebase.js";
+import { updateDoc } from "firebase/firestore";
+import { agencySubDoc } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { OPPORTUNITY_STAGES } from "../constants/propertyEnums.js";
 import { deriveOpportunityStage } from "../lib/pipeline.js";
 import Avatar from "./Avatar.jsx";
@@ -38,6 +39,7 @@ const STATUS_BADGE_CLASS = {
  * so this component adds no new Firestore listeners of its own).
  */
 export default function PipelineBoard({ opportunities, onSelectOpportunity }) {
+  const { agencyId } = useAuth();
   const [draggingCard, setDraggingCard] = useState(null); // { customerId, opportunityId }
   const [dragOverStage, setDragOverStage] = useState(null);
 
@@ -50,10 +52,10 @@ export default function PipelineBoard({ opportunities, onSelectOpportunity }) {
 
   function handleDrop(stageKey) {
     setDragOverStage(null);
-    if (!draggingCard) return;
+    if (!draggingCard || !agencyId) return;
     // Only this one opportunity doc is touched — the customer (lead) doc,
     // its conversation, and every other opportunity are untouched.
-    updateDoc(doc(db, "leads", draggingCard.customerId, "opportunities", draggingCard.opportunityId), {
+    updateDoc(agencySubDoc(agencyId, "leads", draggingCard.customerId, "opportunities", draggingCard.opportunityId), {
       pipelineStage: stageKey,
     }).catch((err) => console.error("Failed to move opportunity", err));
     setDraggingCard(null);

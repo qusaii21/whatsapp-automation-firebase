@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db } from "../firebase.js";
+import { onSnapshot, orderBy, query } from "firebase/firestore";
+import { leadsCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { formatDateTime, formatINR } from "../lib/format.js";
 
 const STATUS_LABELS = {
@@ -12,17 +13,22 @@ const STATUS_LABELS = {
 };
 
 export default function Insights() {
+  const { agencyId } = useAuth();
   const [leads, setLeads] = useState([]);
   const [sortKey, setSortKey] = useState("lastMessageAt");
   const [sortDir, setSortDir] = useState("desc");
 
   useEffect(() => {
-    const q = query(collection(db, "leads"), orderBy("createdAt", "desc"));
+    if (!agencyId) {
+      setLeads([]);
+      return undefined;
+    }
+    const q = query(leadsCollection(agencyId), orderBy("createdAt", "desc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setLeads(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
     });
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   const sortedLeads = useMemo(() => {
     const rows = [...leads];

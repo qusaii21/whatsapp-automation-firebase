@@ -11,6 +11,7 @@ const {
 } = require("./campaigns");
 const { cancelQueuedTasks, dispatchCampaignQueue: runDispatch } = require("./campaignQueue");
 const { CAMPAIGN_DISPATCH_TIMEOUT_SECONDS } = require("./config");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * Pause / Resume / Cancel / Retry Dispatch — Firestore-state HTTP endpoints
@@ -63,6 +64,10 @@ async function handle(res, actionName, fn) {
       res.status(statusCodeFor(err)).json({ error: err.message });
       return;
     }
+    if (err instanceof AuthError) {
+      res.status(err.statusCode).json({ error: err.message });
+      return;
+    }
     logger.error(`campaignControl: ${actionName} failed unexpectedly`, {
       error: err.message,
       stack: err.stack,
@@ -83,7 +88,8 @@ const pauseCampaign = onRequest({ region: "us-central1", cors: true }, async (re
   }
 
   await handle(res, "pause", async () => {
-    const result = await pauseCampaignTx(admin.firestore(), campaignId, { pausedBy });
+    const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
+    const result = await pauseCampaignTx(admin.firestore(), agencyId, campaignId, { pausedBy });
     logger.info("campaignControl: paused", { campaignId, pausedBy });
     return result;
   });
@@ -101,7 +107,8 @@ const resumeCampaign = onRequest({ region: "us-central1", cors: true }, async (r
   }
 
   await handle(res, "resume", async () => {
-    const result = await resumeCampaignTx(admin.firestore(), campaignId, { resumedBy });
+    const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
+    const result = await resumeCampaignTx(admin.firestore(), agencyId, campaignId, { resumedBy });
     logger.info("campaignControl: resumed", { campaignId, resumedBy, target: result.status });
     return result;
   });
@@ -119,12 +126,13 @@ const cancelCampaign = onRequest({ region: "us-central1", cors: true }, async (r
   }
 
   await handle(res, "cancel", async () => {
+    const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
     const db = admin.firestore();
-    const result = await cancelCampaignTx(db, campaignId, { cancelledBy });
+    const result = await cancelCampaignTx(db, agencyId, campaignId, { cancelledBy });
 
     let taskCleanup;
     try {
-      taskCleanup = await cancelQueuedTasks(db, campaignId);
+      taskCleanup = await cancelQueuedTasks(db, agencyId, campaignId);
     } catch (err) {
       // Cancellation itself already succeeded above — a cleanup failure is
       // logged and surfaced, not allowed to turn a successful cancel into a
@@ -156,9 +164,10 @@ const retryCampaignDispatch = onRequest(
     }
 
     await handle(res, "retry dispatch for", async () => {
+      const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
       const db = admin.firestore();
       const projectId = process.env.GCLOUD_PROJECT;
-      const result = await runDispatch(db, campaignId, projectId);
+      const result = await runDispatch(db, agencyId, campaignId, projectId);
       logger.info("campaignControl: retry dispatch run", { campaignId, ...result });
 
       // Also covers a campaign that finished sending before
@@ -168,7 +177,7 @@ const retryCampaignDispatch = onRequest(
       // automatic check in processCampaignRecipient.js.
       let completion = null;
       try {
-        completion = await completeCampaignIfFinished(db, campaignId);
+        completion = await completeCampaignIfFinished(db, agencyId, campaignId);
         if (completion) {
           logger.info("campaignControl: retry dispatch also completed a stuck campaign", { campaignId });
         }

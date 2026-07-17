@@ -3,13 +3,13 @@ const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
 const {
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_NUMBER_ID,
+  WHATSAPP_CRED_ENC_KEY,
   CAMPAIGN_RECIPIENT_TIMEOUT_SECONDS,
   CAMPAIGN_RECIPIENT_SEND_CLAIM_STALE_MS,
   CAMPAIGN_RECIPIENT_MAX_ATTEMPTS,
 } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 const {
   campaignsCollection,
   recipientsCollection,
@@ -19,6 +19,7 @@ const {
 } = require("./campaigns");
 const { assertTemplateApprovedForCampaign, TemplateError } = require("./whatsappTemplates");
 const { recordWhatsAppSentInTx, recordWhatsAppFailedInTx } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * CAMPAIGN RECIPIENT WORKER
@@ -108,8 +109,8 @@ const { recordWhatsAppSentInTx, recordWhatsAppFailedInTx } = require("./metrics"
 
 const ACTIVE_CAMPAIGN_STATUSES = ["queued", "sending"];
 
-function recipientRef(db, campaignId, recipientId) {
-  return recipientsCollection(db, campaignId).doc(recipientId);
+function recipientRef(db, agencyId, campaignId, recipientId) {
+  return recipientsCollection(db, agencyId, campaignId).doc(recipientId);
 }
 
 /**
@@ -117,8 +118,8 @@ function recipientRef(db, campaignId, recipientId) {
  *   { proceed: false, reason }              — nothing to do, ack and stop
  *   { proceed: true, recipient, attempts }  — caller now owns this attempt
  */
-async function claimRecipient(db, campaignId, recipientId) {
-  const ref = recipientRef(db, campaignId, recipientId);
+async function claimRecipient(db, agencyId, campaignId, recipientId) {
+  const ref = recipientRef(db, agencyId, campaignId, recipientId);
 
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -165,9 +166,9 @@ async function claimRecipient(db, campaignId, recipientId) {
  * if the recipient somehow isn't `queued` anymore by the time this runs —
  * defensive only, since claimRecipient already made this attempt exclusive.
  */
-async function finalizeSuccess(db, campaignId, recipientId, messageId, templateCategory) {
-  const rRef = recipientRef(db, campaignId, recipientId);
-  const cRef = campaignsCollection(db).doc(campaignId);
+async function finalizeSuccess(db, agencyId, campaignId, recipientId, messageId, templateCategory) {
+  const rRef = recipientRef(db, agencyId, campaignId, recipientId);
+  const cRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(rRef);
@@ -203,7 +204,7 @@ async function finalizeSuccess(db, campaignId, recipientId, messageId, templateC
     // Marketing/Utility/Authentication for this campaign's template) is
     // passed through so the cost is booked at the rate that template
     // actually bills under — see metrics.js's recordWhatsAppSentInTx.
-    recordWhatsAppSentInTx(tx, db, templateCategory);
+    recordWhatsAppSentInTx(tx, db, agencyId, templateCategory);
   });
 }
 
@@ -214,9 +215,9 @@ async function finalizeSuccess(db, campaignId, recipientId, messageId, templateC
  * leaves the recipient `queued` with `lastError` recorded and releases the
  * in-flight lock so a subsequent Cloud Tasks redelivery can re-claim it.
  */
-async function finalizeFailure(db, campaignId, recipientId, errorMessage, { permanent }) {
-  const rRef = recipientRef(db, campaignId, recipientId);
-  const cRef = campaignsCollection(db).doc(campaignId);
+async function finalizeFailure(db, agencyId, campaignId, recipientId, errorMessage, { permanent }) {
+  const rRef = recipientRef(db, agencyId, campaignId, recipientId);
+  const cRef = campaignsCollection(db, agencyId).doc(campaignId);
 
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(rRef);
@@ -249,7 +250,7 @@ async function finalizeFailure(db, campaignId, recipientId, errorMessage, { perm
       // METRICS: only the `permanent: true` (terminal) branch counts — a
       // transient failure below leaves the recipient `queued` for Cloud
       // Tasks to retry and must not be counted as a failure yet.
-      recordWhatsAppFailedInTx(tx, db);
+      recordWhatsAppFailedInTx(tx, db, agencyId);
     } else {
       tx.set(
         rRef,
@@ -465,9 +466,9 @@ function classifySendError(err) {
  * for this recipient — a failure here just means the campaign's status
  * lags reality slightly, not that this recipient's own outcome was lost.
  */
-async function checkCampaignCompletion(db, campaignId) {
+async function checkCampaignCompletion(db, agencyId, campaignId) {
   try {
-    const result = await completeCampaignIfFinished(db, campaignId);
+    const result = await completeCampaignIfFinished(db, agencyId, campaignId);
     if (result) {
       logger.info("processCampaignRecipient: campaign completed", { campaignId });
     }
@@ -481,18 +482,25 @@ async function checkCampaignCompletion(db, campaignId) {
 
 const processCampaignRecipient = onRequest(
   {
-    secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID],
+    secrets: [WHATSAPP_CRED_ENC_KEY],
     region: "us-central1",
     invoker: "private",
     timeoutSeconds: CAMPAIGN_RECIPIENT_TIMEOUT_SECONDS,
   },
   async (req, res) => {
-    const { campaignId, recipientId } = req.body || {};
-    if (!campaignId || typeof campaignId !== "string" || !recipientId || typeof recipientId !== "string") {
+    const { campaignId, agencyId, recipientId } = req.body || {};
+    if (
+      !campaignId ||
+      typeof campaignId !== "string" ||
+      !agencyId ||
+      typeof agencyId !== "string" ||
+      !recipientId ||
+      typeof recipientId !== "string"
+    ) {
       // Malformed task payload — retrying won't fix it, ack so Cloud Tasks
       // doesn't keep redelivering a request that can never succeed.
-      logger.error("processCampaignRecipient: missing campaignId/recipientId in task payload");
-      res.status(200).send("Missing or invalid 'campaignId'/'recipientId'");
+      logger.error("processCampaignRecipient: missing campaignId/agencyId/recipientId in task payload");
+      res.status(200).send("Missing or invalid 'campaignId'/'agencyId'/'recipientId'");
       return;
     }
 
@@ -500,7 +508,7 @@ const processCampaignRecipient = onRequest(
 
     try {
       // 1. Load campaign, validate it's still active.
-      const campaignSnap = await campaignsCollection(db).doc(campaignId).get();
+      const campaignSnap = await campaignsCollection(db, agencyId).doc(campaignId).get();
       if (!campaignSnap.exists) {
         logger.error("processCampaignRecipient: campaign not found", { campaignId, recipientId });
         res.sendStatus(200);
@@ -521,7 +529,7 @@ const processCampaignRecipient = onRequest(
       }
 
       // 2. Atomically claim the recipient — the exactly-once gate.
-      const claim = await claimRecipient(db, campaignId, recipientId);
+      const claim = await claimRecipient(db, agencyId, campaignId, recipientId);
       if (!claim.proceed) {
         logger.info("processCampaignRecipient: skipping, nothing to do", {
           campaignId,
@@ -533,18 +541,38 @@ const processCampaignRecipient = onRequest(
       }
       const { recipient, attempts } = claim;
 
+      // 2b. Load THIS agency's own WhatsApp connection. A disconnected/
+      // never-connected agency can never succeed on retry, so this is
+      // treated as a permanent failure for the recipient (same posture as
+      // an unretryable Meta error below) rather than burning through
+      // CAMPAIGN_RECIPIENT_MAX_ATTEMPTS retries that will all fail
+      // identically.
+      let creds;
+      try {
+        creds = await loadWhatsAppCredentials(db, agencyId);
+      } catch (err) {
+        if (err instanceof WhatsAppNotConnectedError) {
+          await finalizeFailure(db, agencyId, campaignId, recipientId, err.message, { permanent: true });
+          await checkCampaignCompletion(db, agencyId, campaignId);
+          res.status(200).json({ skipped: true, reason: "not_connected" });
+          return;
+        }
+        throw err;
+      }
+
+
       // 3. Re-validate the template is still approved (don't trust the
       // task's snapshot — see file header).
       let template;
       try {
-        template = await assertTemplateApprovedForCampaign(db, {
+        template = await assertTemplateApprovedForCampaign(db, agencyId, {
           templateName: campaign.templateName,
           templateLanguage: campaign.templateLanguage,
         });
       } catch (err) {
         const message = err instanceof CampaignError || err instanceof TemplateError ? err.message : err.message;
-        await finalizeFailure(db, campaignId, recipientId, message, { permanent: true });
-        await checkCampaignCompletion(db, campaignId);
+        await finalizeFailure(db, agencyId, campaignId, recipientId, message, { permanent: true });
+        await checkCampaignCompletion(db, agencyId, campaignId);
         logger.warn("processCampaignRecipient: template no longer approved, recipient failed permanently", {
           campaignId,
           recipientId,
@@ -555,16 +583,16 @@ const processCampaignRecipient = onRequest(
       }
 
       // 4. Load the linked lead for personalization + opt-in status.
-      const leadSnap = await db.collection("leads").doc(recipient.phone).get();
+      const leadSnap = await agencyCollection(db, agencyId, "leads").doc(recipient.phone).get();
       const lead = leadSnap.exists ? leadSnap.data() : null;
 
       // 5. Opt-in check (future compatibility — no feature sets this flag
       // yet, so its absence is treated as "opted in").
       if (lead?.optedOut === true) {
-        await finalizeFailure(db, campaignId, recipientId, "Recipient has opted out of WhatsApp messages.", {
+        await finalizeFailure(db, agencyId, campaignId, recipientId, "Recipient has opted out of WhatsApp messages.", {
           permanent: true,
         });
-        await checkCampaignCompletion(db, campaignId);
+        await checkCampaignCompletion(db, agencyId, campaignId);
         logger.info("processCampaignRecipient: recipient opted out, skipping permanently", {
           campaignId,
           recipientId,
@@ -583,17 +611,17 @@ const processCampaignRecipient = onRequest(
           templateName: template.name,
           languageCode: template.language,
           components,
-          whatsappToken: WHATSAPP_TOKEN.value(),
-          phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+          whatsappToken: creds.whatsappToken,
+          phoneNumberId: creds.phoneNumberId,
         });
       } catch (err) {
         const classification = classifySendError(err);
         const outOfAttempts = attempts >= CAMPAIGN_RECIPIENT_MAX_ATTEMPTS;
         const permanent = !classification.retryable || outOfAttempts;
 
-        await finalizeFailure(db, campaignId, recipientId, classification.message, { permanent });
+        await finalizeFailure(db, agencyId, campaignId, recipientId, classification.message, { permanent });
         if (permanent) {
-          await checkCampaignCompletion(db, campaignId);
+          await checkCampaignCompletion(db, agencyId, campaignId);
         }
 
         logger.warn("processCampaignRecipient: send failed", {
@@ -625,7 +653,7 @@ const processCampaignRecipient = onRequest(
       // already made this transition just throws failed_precondition here,
       // which is expected and safely ignored.
       try {
-        await updateCampaignStatus(db, campaignId, "sending");
+        await updateCampaignStatus(db, agencyId, campaignId, "sending");
       } catch (err) {
         if (!(err instanceof CampaignError) || err.code !== "failed_precondition") {
           logger.warn("processCampaignRecipient: unexpected error flipping campaign to sending", {
@@ -635,8 +663,8 @@ const processCampaignRecipient = onRequest(
         }
       }
 
-      await finalizeSuccess(db, campaignId, recipientId, messageId, template.category);
-      await checkCampaignCompletion(db, campaignId);
+      await finalizeSuccess(db, agencyId, campaignId, recipientId, messageId, template.category);
+      await checkCampaignCompletion(db, agencyId, campaignId);
 
       logger.info("processCampaignRecipient: sent", { campaignId, recipientId, messageId, attempts });
       res.status(200).json({ ok: true, recipientId, messageId });

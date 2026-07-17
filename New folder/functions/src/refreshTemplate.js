@@ -2,8 +2,10 @@ const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
-const { WHATSAPP_TOKEN } = require("./config");
+const { WHATSAPP_CRED_ENC_KEY } = require("./config");
 const { refreshSingleTemplate, TemplateError } = require("./whatsappTemplates");
+const { requireAuthContext, AuthError } = require("./auth");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 
 /**
  * POST /refreshTemplate
@@ -32,7 +34,7 @@ const refreshTemplate = onRequest(
   {
     region: "us-central1",
     cors: true,
-    secrets: [WHATSAPP_TOKEN],
+    secrets: [WHATSAPP_CRED_ENC_KEY],
   },
   async (req, res) => {
     if (req.method !== "POST") {
@@ -47,18 +49,28 @@ const refreshTemplate = onRequest(
     }
 
     try {
+      const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
       const db = admin.firestore();
-      const result = await refreshSingleTemplate(db, {
+      const creds = await loadWhatsAppCredentials(db, agencyId);
+      const result = await refreshSingleTemplate(db, agencyId, {
         templateId,
-        whatsappToken: WHATSAPP_TOKEN.value(),
+        whatsappToken: creds.whatsappToken,
       });
 
       logger.info("refreshTemplate: success", { templateId });
       res.status(200).json(result);
     } catch (err) {
+      if (err instanceof WhatsAppNotConnectedError) {
+        res.status(409).json({ error: err.message, code: "not_connected" });
+        return;
+      }
       if (err instanceof TemplateError) {
         const statusCode = err.code === "upstream_error" ? 502 : 400;
         res.status(statusCode).json({ error: err.message });
+        return;
+      }
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
         return;
       }
       logger.error("refreshTemplate: unexpected error", { error: err.message, stack: err.stack });

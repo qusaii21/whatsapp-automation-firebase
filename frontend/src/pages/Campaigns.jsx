@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, doc, onSnapshot } from "firebase/firestore";
+import { onSnapshot } from "firebase/firestore";
 import { useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -14,9 +14,10 @@ import {
   Users,
   Clock,
 } from "lucide-react";
-import { db } from "../firebase.js";
+import { campaignsCollection, campaignDoc, templatesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { formatDateTime, sortByRecency } from "../lib/format.js";
-import { functionsBaseUrl } from "../lib/functions.js";
+import { authedFetch } from "../lib/functions.js";
 import CampaignRecipients from "../components/CampaignRecipients.jsx";
 import CampaignLaunch from "../components/CampaignLaunch.jsx";
 import CampaignActions from "../components/CampaignActions.jsx";
@@ -179,15 +180,21 @@ function StatTile({ icon: Icon, label, value, tone }) {
 }
 
 function CampaignDetail({ campaignId, onBack, onNavigate }) {
+  const { agencyId } = useAuth();
   const [campaign, setCampaign] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
+    if (!agencyId) {
+      setCampaign(null);
+      setLoading(true);
+      return undefined;
+    }
     setLoading(true);
     setNotFound(false);
     const unsubscribe = onSnapshot(
-      doc(db, "campaigns", campaignId),
+      campaignDoc(agencyId, campaignId),
       (snap) => {
         if (!snap.exists()) {
           setCampaign(null);
@@ -200,7 +207,7 @@ function CampaignDetail({ campaignId, onBack, onNavigate }) {
       () => setLoading(false)
     );
     return unsubscribe;
-  }, [campaignId]);
+  }, [agencyId, campaignId]);
 
   return (
     <div className="page">
@@ -284,6 +291,7 @@ function CampaignDetail({ campaignId, onBack, onNavigate }) {
 }
 
 export default function Campaigns() {
+  const { agencyId } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("id");
 
@@ -304,8 +312,13 @@ export default function Campaigns() {
   const [templates, setTemplates] = useState([]);
 
   useEffect(() => {
+    if (!agencyId) {
+      setCampaigns([]);
+      setLoading(true);
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "campaigns"),
+      campaignsCollection(agencyId),
       (snapshot) => {
         setCampaigns(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
         setLoading(false);
@@ -313,16 +326,20 @@ export default function Campaigns() {
       () => setLoading(false)
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
+    if (!agencyId) {
+      setTemplates([]);
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "whatsappTemplates"),
+      templatesCollection(agencyId),
       (snapshot) => setTemplates(snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))),
       () => {}
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   // Deep link from the Dashboard's "Create Campaign" quick action.
   useEffect(() => {
@@ -423,7 +440,7 @@ export default function Campaigns() {
     setSaving(true);
     setFormError(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/createCampaign`, {
+      const res = await authedFetch("/createCampaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

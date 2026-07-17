@@ -14,6 +14,7 @@ const {
   deleteCampaignRecipientTask,
   createCampaignDispatchTask,
 } = require("./cloudTasks");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * CAMPAIGN QUEUE ENGINE
@@ -71,12 +72,12 @@ const {
  *      dispatcher.js draws for its own, different problem.
  */
 
-function dispatchLockRef(db, campaignId) {
-  return db.collection("campaignDispatchLocks").doc(campaignId);
+function dispatchLockRef(db, agencyId, campaignId) {
+  return agencyCollection(db, agencyId, "campaignDispatchLocks").doc(campaignId);
 }
 
-async function tryAcquireDispatchLock(db, campaignId) {
-  const ref = dispatchLockRef(db, campaignId);
+async function tryAcquireDispatchLock(db, agencyId, campaignId) {
+  const ref = dispatchLockRef(db, agencyId, campaignId);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const data = snap.exists ? snap.data() : null;
@@ -95,15 +96,15 @@ async function tryAcquireDispatchLock(db, campaignId) {
   });
 }
 
-async function releaseDispatchLock(db, campaignId) {
-  await dispatchLockRef(db, campaignId).set(
+async function releaseDispatchLock(db, agencyId, campaignId) {
+  await dispatchLockRef(db, agencyId, campaignId).set(
     { active: false, lockedAt: admin.firestore.FieldValue.serverTimestamp() },
     { merge: true }
   );
 }
 
-async function heartbeatDispatchLock(db, campaignId) {
-  await dispatchLockRef(db, campaignId).set(
+async function heartbeatDispatchLock(db, agencyId, campaignId) {
+  await dispatchLockRef(db, agencyId, campaignId).set(
     { active: true, lockedAt: admin.firestore.FieldValue.serverTimestamp() },
     { merge: true }
   );
@@ -117,9 +118,10 @@ async function heartbeatDispatchLock(db, campaignId) {
  * shouldn't be affected by the template changing after this recipient was
  * already queued.
  */
-function buildTaskPayload({ campaignId, recipientId, phone, template, attempt }) {
+function buildTaskPayload({ campaignId, agencyId, recipientId, phone, template, attempt }) {
   return {
     campaignId,
+    agencyId,
     recipientId,
     phone,
     templateId: template.templateId || null,
@@ -139,8 +141,8 @@ function buildTaskPayload({ campaignId, recipientId, phone, template, attempt })
  * "pending" and gets picked up by the next dispatch run, instead of one bad
  * recipient aborting the whole chunk.
  */
-async function enqueueChunk(db, campaignId, projectId, recipientDocs, template) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function enqueueChunk(db, agencyId, campaignId, projectId, recipientDocs, template) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
   const attempt = 1; // this phase only ever does the first attempt
   const batch = db.batch();
   let enqueuedInChunk = 0;
@@ -154,10 +156,11 @@ async function enqueueChunk(db, campaignId, projectId, recipientDocs, template) 
     try {
       taskResult = await createCampaignRecipientTask({
         projectId,
+        agencyId,
         campaignId,
         recipientId,
         attempt,
-        payload: buildTaskPayload({ campaignId, recipientId, phone: recipient.phone, template, attempt }),
+        payload: buildTaskPayload({ campaignId, agencyId, recipientId, phone: recipient.phone, template, attempt }),
       });
     } catch (err) {
       logger.error("campaignQueue: failed to create task for recipient", {
@@ -213,8 +216,8 @@ async function enqueueChunk(db, campaignId, projectId, recipientDocs, template) 
  *   { chained: true, enqueuedThisRun }      ran out of time budget, handed off
  *   { done: true, enqueuedThisRun }         every pending recipient enqueued
  */
-async function dispatchCampaignQueue(db, campaignId, projectId, { startedAt = Date.now() } = {}) {
-  const campaignRef = campaignsCollection(db).doc(campaignId);
+async function dispatchCampaignQueue(db, agencyId, campaignId, projectId, { startedAt = Date.now() } = {}) {
+  const campaignRef = campaignsCollection(db, agencyId).doc(campaignId);
   const campaignSnap = await campaignRef.get();
   if (!campaignSnap.exists) {
     throw new CampaignError(`Campaign '${campaignId}' not found.`, "not_found");
@@ -240,7 +243,7 @@ async function dispatchCampaignQueue(db, campaignId, projectId, { startedAt = Da
     templateLanguage: campaign.templateLanguage,
   });
 
-  const gotLock = await tryAcquireDispatchLock(db, campaignId);
+  const gotLock = await tryAcquireDispatchLock(db, agencyId, campaignId);
   if (!gotLock) {
     logger.info("campaignQueue: dispatch already in progress for this campaign, skipping", { campaignId });
     return { skipped: true, reason: "lock_held" };
@@ -261,11 +264,11 @@ async function dispatchCampaignQueue(db, campaignId, projectId, { startedAt = Da
     while (true) {
       if (Date.now() - startedAt > CAMPAIGN_DISPATCH_TIMEOUT_SECONDS * 1000 - CAMPAIGN_DISPATCH_TIME_BUDGET_BUFFER_MS) {
         logger.info("campaignQueue: time budget exhausted, chaining", { campaignId, enqueuedThisRun });
-        await createCampaignDispatchTask(campaignId, projectId);
+        await createCampaignDispatchTask(campaignId, agencyId, projectId);
         return { chained: true, enqueuedThisRun };
       }
 
-      const pendingSnap = await recipientsCollection(db, campaignId)
+      const pendingSnap = await recipientsCollection(db, agencyId, campaignId)
         .where("status", "==", "pending")
         .limit(CAMPAIGN_DISPATCH_CHUNK_SIZE)
         .get();
@@ -274,15 +277,15 @@ async function dispatchCampaignQueue(db, campaignId, projectId, { startedAt = Da
         break;
       }
 
-      enqueuedThisRun += await enqueueChunk(db, campaignId, projectId, pendingSnap.docs, template);
-      await heartbeatDispatchLock(db, campaignId);
+      enqueuedThisRun += await enqueueChunk(db, agencyId, campaignId, projectId, pendingSnap.docs, template);
+      await heartbeatDispatchLock(db, agencyId, campaignId);
     }
 
-    await releaseDispatchLock(db, campaignId);
+    await releaseDispatchLock(db, agencyId, campaignId);
     logger.info("campaignQueue: dispatch complete", { campaignId, enqueuedThisRun });
     return { done: true, enqueuedThisRun };
   } catch (err) {
-    await releaseDispatchLock(db, campaignId);
+    await releaseDispatchLock(db, agencyId, campaignId);
     throw err;
   }
 }
@@ -300,8 +303,8 @@ async function dispatchCampaignQueue(db, campaignId, projectId, { startedAt = Da
  * signal the future sending worker checks before ever acting on a task, not
  * the recipient's own status.
  */
-async function cancelQueuedTasks(db, campaignId) {
-  const snap = await recipientsCollection(db, campaignId).where("status", "==", "queued").get();
+async function cancelQueuedTasks(db, agencyId, campaignId) {
+  const snap = await recipientsCollection(db, agencyId, campaignId).where("status", "==", "queued").get();
 
   let attempted = 0;
   let deleted = 0;

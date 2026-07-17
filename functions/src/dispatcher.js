@@ -1,6 +1,7 @@
 const admin = require("firebase-admin");
 const logger = require("firebase-functions/logger");
 const { DISPATCHER_STALE_LOCK_MS } = require("./config");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * PHASE 1 — per-phone sequential processing.
@@ -35,12 +36,12 @@ const { DISPATCHER_STALE_LOCK_MS } = require("./config");
  * for correctness-critical exactly-once/ordering guarantees).
  */
 
-function lockRef(db, phone) {
-  return db.collection("dispatcherLocks").doc(phone);
+function lockRef(db, agencyId, phone) {
+  return agencyCollection(db, agencyId, "dispatcherLocks").doc(phone);
 }
 
-function inboxCollection(db, phone) {
-  return db.collection("leads").doc(phone).collection("inbox");
+function inboxCollection(db, agencyId, phone) {
+  return agencyCollection(db, agencyId, "leads").doc(phone).collection("inbox");
 }
 
 /**
@@ -48,8 +49,8 @@ function inboxCollection(db, phone) {
  * caller is expected to have already deduped via processedMessages before
  * calling this — see whatsappWebhook.js).
  */
-async function enqueueInboxItem(db, phone, { messageId, text, contactName }) {
-  await inboxCollection(db, phone).doc(messageId).set(
+async function enqueueInboxItem(db, agencyId, phone, { messageId, text, contactName }) {
+  await inboxCollection(db, agencyId, phone).doc(messageId).set(
     {
       text,
       contactName: contactName || null,
@@ -71,8 +72,8 @@ async function enqueueInboxItem(db, phone, { messageId, text, contactName }) {
  * — this is what prevents a crash from permanently wedging one phone's
  * conversation.
  */
-async function tryAcquireLock(db, phone) {
-  const ref = lockRef(db, phone);
+async function tryAcquireLock(db, agencyId, phone) {
+  const ref = lockRef(db, agencyId, phone);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const data = snap.exists ? snap.data() : null;
@@ -101,9 +102,9 @@ async function tryAcquireLock(db, phone) {
  * Returns { released: true } if the lock was freed, or
  * { released: false } if a new item was found (caller should keep draining).
  */
-async function tryReleaseLock(db, phone) {
-  const ref = lockRef(db, phone);
-  const inbox = inboxCollection(db, phone);
+async function tryReleaseLock(db, agencyId, phone) {
+  const ref = lockRef(db, agencyId, phone);
+  const inbox = inboxCollection(db, agencyId, phone);
 
   return db.runTransaction(async (tx) => {
     // Firestore transactions require all reads before writes, and query
@@ -122,8 +123,8 @@ async function tryReleaseLock(db, phone) {
  * Called periodically during a long drain so a legitimately-still-running
  * execution never gets mistaken for a crashed one by the staleness check.
  */
-async function heartbeatLock(db, phone) {
-  await lockRef(db, phone).set(
+async function heartbeatLock(db, agencyId, phone) {
+  await lockRef(db, agencyId, phone).set(
     { active: true, lockedAt: admin.firestore.FieldValue.serverTimestamp() },
     { merge: true }
   );

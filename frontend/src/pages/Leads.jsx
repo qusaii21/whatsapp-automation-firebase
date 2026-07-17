@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db } from "../firebase.js";
+import { onSnapshot, orderBy, query } from "firebase/firestore";
+import { leadsCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import ConversationThread from "../components/ConversationThread.jsx";
 
 const STATUS_COLUMNS = [
@@ -11,18 +12,23 @@ const STATUS_COLUMNS = [
 ];
 
 export default function Leads() {
+  const { agencyId } = useAuth();
   const [leads, setLeads] = useState([]);
   const [search, setSearch] = useState("");
   const [expandedPhone, setExpandedPhone] = useState(null);
 
   useEffect(() => {
-    const q = query(collection(db, "leads"), orderBy("createdAt", "desc"));
+    if (!agencyId) {
+      setLeads([]);
+      return undefined;
+    }
+    const q = query(leadsCollection(agencyId), orderBy("createdAt", "desc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const rows = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setLeads(rows);
     });
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   const filteredLeads = useMemo(() => {
     const term = search.trim().toLowerCase();

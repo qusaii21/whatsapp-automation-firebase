@@ -44,7 +44,7 @@ async function createImmediateTask(functionName, payload, projectId) {
  * @param {string} phone Lead's phone number (also the Firestore doc id).
  * @param {string} projectId GCP project id (from process.env.GCLOUD_PROJECT).
  */
-async function createFollowupTask(phone, projectId) {
+async function createFollowupTask(phone, agencyId, projectId) {
   const parent = tasksClient.queuePath(projectId, REGION, FOLLOWUP_QUEUE_NAME);
 
   // Cloud Functions 2nd gen HTTPS endpoints are Cloud Run services under the
@@ -58,7 +58,7 @@ async function createFollowupTask(phone, projectId) {
       httpMethod: "POST",
       url: followupUrl,
       headers: { "Content-Type": "application/json" },
-      body: Buffer.from(JSON.stringify({ phone })).toString("base64"),
+      body: Buffer.from(JSON.stringify({ phone, agencyId })).toString("base64"),
       // OIDC token lets Cloud Tasks authenticate as this service account so
       // followupCheck can require authenticated invocations (not open to the
       // public internet) while still being callable by the queue.
@@ -86,7 +86,7 @@ async function createFollowupTask(phone, projectId) {
  *   immediately — used for retry backoff, never for the time-budget handoff
  *   case (that one should run right away).
  */
-async function createPhoneQueueTask(phone, projectId, delaySeconds = 0) {
+async function createPhoneQueueTask(phone, agencyId, projectId, delaySeconds = 0) {
   const parent = tasksClient.queuePath(projectId, REGION, MESSAGE_QUEUE_NAME);
   const targetUrl = `https://${REGION}-${projectId}.cloudfunctions.net/processPhoneQueue`;
 
@@ -95,7 +95,7 @@ async function createPhoneQueueTask(phone, projectId, delaySeconds = 0) {
       httpMethod: "POST",
       url: targetUrl,
       headers: { "Content-Type": "application/json" },
-      body: Buffer.from(JSON.stringify({ phone })).toString("base64"),
+      body: Buffer.from(JSON.stringify({ phone, agencyId })).toString("base64"),
       oidcToken: {
         serviceAccountEmail: `${projectId}@appspot.gserviceaccount.com`,
       },
@@ -128,8 +128,8 @@ async function createPhoneQueueTask(phone, projectId, delaySeconds = 0) {
  * lock + "only enqueue recipients still pending" gate are what actually make
  * repeat dispatch runs safe.
  */
-function campaignRecipientTaskName(projectId, campaignId, recipientId, attempt) {
-  const taskId = `camp-${campaignId}-${recipientId}-a${attempt}`;
+function campaignRecipientTaskName(projectId, agencyId, campaignId, recipientId, attempt) {
+  const taskId = `camp-${agencyId}-${campaignId}-${recipientId}-a${attempt}`;
   return `projects/${projectId}/locations/${REGION}/queues/${CAMPAIGN_QUEUE_NAME}/tasks/${taskId}`;
 }
 
@@ -143,10 +143,10 @@ function campaignRecipientTaskName(projectId, campaignId, recipientId, attempt) 
  * need to know whether this call created the task or found it already
  * there, only that it now exists.
  */
-async function createCampaignRecipientTask({ projectId, campaignId, recipientId, attempt, payload }) {
+async function createCampaignRecipientTask({ projectId, agencyId, campaignId, recipientId, attempt, payload }) {
   const parent = tasksClient.queuePath(projectId, REGION, CAMPAIGN_QUEUE_NAME);
   const targetUrl = `https://${REGION}-${projectId}.cloudfunctions.net/processCampaignRecipient`;
-  const name = campaignRecipientTaskName(projectId, campaignId, recipientId, attempt);
+  const name = campaignRecipientTaskName(projectId, agencyId, campaignId, recipientId, attempt);
 
   const task = {
     name,
@@ -200,7 +200,7 @@ async function deleteCampaignRecipientTask(taskName) {
  * lock + pending-recipient gate make a second concurrent/redundant dispatch
  * run a safe no-op), so there's nothing to dedupe here.
  */
-async function createCampaignDispatchTask(campaignId, projectId, delaySeconds = 0) {
+async function createCampaignDispatchTask(campaignId, agencyId, projectId, delaySeconds = 0) {
   const parent = tasksClient.queuePath(projectId, REGION, CAMPAIGN_QUEUE_NAME);
   const targetUrl = `https://${REGION}-${projectId}.cloudfunctions.net/dispatchCampaignQueue`;
 
@@ -209,7 +209,7 @@ async function createCampaignDispatchTask(campaignId, projectId, delaySeconds = 
       httpMethod: "POST",
       url: targetUrl,
       headers: { "Content-Type": "application/json" },
-      body: Buffer.from(JSON.stringify({ campaignId })).toString("base64"),
+      body: Buffer.from(JSON.stringify({ campaignId, agencyId })).toString("base64"),
       oidcToken: {
         serviceAccountEmail: `${projectId}@appspot.gserviceaccount.com`,
       },

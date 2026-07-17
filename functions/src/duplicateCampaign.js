@@ -10,6 +10,7 @@ const {
   getNextRunNumber,
   CampaignError,
 } = require("./campaigns");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * "Reuse campaign" — duplicates an existing campaign (any status: draft,
@@ -84,6 +85,7 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
   }
 
   try {
+    const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
     const { campaignId, name } = req.body || {};
     if (!campaignId || typeof campaignId !== "string") {
       res.status(400).json({ error: "Missing or invalid 'campaignId'" });
@@ -91,7 +93,7 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
     }
 
     const db = admin.firestore();
-    const { data: source } = await getCampaign(db, campaignId);
+    const { data: source } = await getCampaign(db, agencyId, campaignId);
 
     // LINEAGE: a source that already belongs to a lineage (was itself a
     // reuse, or has been reused before) carries its own rootCampaignId
@@ -100,9 +102,9 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
     // way it IS the root of its own lineage, so it's used as the fallback
     // rather than requiring a migration of old campaign docs.
     const rootCampaignId = source.rootCampaignId || campaignId;
-    const runNumber = await getNextRunNumber(db, rootCampaignId);
+    const runNumber = await getNextRunNumber(db, agencyId, rootCampaignId);
 
-    const { id, data } = await createCampaignDoc(db, {
+    const { id, data } = await createCampaignDoc(db, agencyId, {
       name: (typeof name === "string" && name.trim()) || `${source.name} (Copy)`,
       description: source.description,
       type: source.type,
@@ -116,7 +118,7 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
 
     // Pull every existing recipient's { phone, leadId } only — status/
     // history deliberately dropped, see file header.
-    const recipientsSnap = await recipientsCollection(db, campaignId).get();
+    const recipientsSnap = await recipientsCollection(db, agencyId, campaignId).get();
     const recipients = recipientsSnap.docs.map((doc) => {
       const r = doc.data();
       return { phone: r.phone, leadId: r.leadId || null };
@@ -124,7 +126,7 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
 
     let recipientResult = { added: 0, skippedDuplicates: 0, skippedInvalid: 0, totalRecipients: 0 };
     if (recipients.length > 0) {
-      recipientResult = await addRecipientsToCampaign(db, id, recipients);
+      recipientResult = await addRecipientsToCampaign(db, agencyId, id, recipients);
     }
 
     logger.info("duplicateCampaign: created", {
@@ -144,6 +146,10 @@ const duplicateCampaign = onRequest({ region: "us-central1", cors: true }, async
     if (err instanceof CampaignError) {
       const statusCode = err.code === "not_found" ? 404 : 400;
       res.status(statusCode).json({ error: err.message });
+      return;
+    }
+    if (err instanceof AuthError) {
+      res.status(err.statusCode).json({ error: err.message });
       return;
     }
     logger.error("duplicateCampaign: failed", { error: err.message, stack: err.stack });

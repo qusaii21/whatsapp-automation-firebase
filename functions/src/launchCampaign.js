@@ -5,6 +5,7 @@ const admin = require("firebase-admin");
 const { getCampaign, launchCampaign: launchCampaignTransaction, CampaignError } = require("./campaigns");
 const { assertTemplateApprovedForCampaign } = require("./whatsappTemplates");
 const { dispatchCampaignQueue } = require("./campaignQueue");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * CAMPAIGN LAUNCH — draft -> queued -> (dispatch triggered).
@@ -37,7 +38,7 @@ const { dispatchCampaignQueue } = require("./campaignQueue");
  * campaign with both zero recipients AND a pending template reports both,
  * rather than making the operator fix one, resubmit, and discover the next.
  */
-async function validateCampaignForLaunch(db, campaign) {
+async function validateCampaignForLaunch(db, agencyId, campaign) {
   const errors = [];
 
   if (campaign.status !== "draft") {
@@ -50,7 +51,7 @@ async function validateCampaignForLaunch(db, campaign) {
 
   let template = null;
   try {
-    template = await assertTemplateApprovedForCampaign(db, {
+    template = await assertTemplateApprovedForCampaign(db, agencyId, {
       templateName: campaign.templateName,
       templateLanguage: campaign.templateLanguage,
     });
@@ -94,6 +95,8 @@ const launchCampaign = onRequest(
     }
 
     try {
+      const context = await requireAuthContext(req, { roles: ["owner", "admin", "agent"] });
+      const agencyId = context.agencyId;
       const { campaignId, launchedBy } = req.body || {};
 
       if (!campaignId || typeof campaignId !== "string") {
@@ -102,16 +105,16 @@ const launchCampaign = onRequest(
       }
 
       const db = admin.firestore();
-      const { data: campaign } = await getCampaign(db, campaignId);
+      const { data: campaign } = await getCampaign(db, agencyId, campaignId);
 
-      const { errors, template } = await validateCampaignForLaunch(db, campaign);
+      const { errors, template } = await validateCampaignForLaunch(db, agencyId, campaign);
       if (errors.length > 0) {
         logger.info("launchCampaign: validation failed", { campaignId, errors });
         res.status(422).json({ error: "Campaign failed launch validation.", errors });
         return;
       }
 
-      const queuedBy = typeof launchedBy === "string" && launchedBy.trim() ? launchedBy.trim() : "web";
+      const queuedBy = typeof launchedBy === "string" && launchedBy.trim() ? launchedBy.trim() : context.email;
       const validationSummary = {
         totalRecipients: campaign.totalRecipients,
         templateName: campaign.templateName,
@@ -120,7 +123,7 @@ const launchCampaign = onRequest(
         checkedAt: Date.now(),
       };
 
-      const result = await launchCampaignTransaction(db, campaignId, { queuedBy, validationSummary });
+      const result = await launchCampaignTransaction(db, agencyId, campaignId, { queuedBy, validationSummary });
       logger.info("launchCampaign: queued", { campaignId, queuedBy });
 
       // Trigger the queue engine now that the campaign is actually queued.
@@ -130,7 +133,7 @@ const launchCampaign = onRequest(
       // without risking duplicate tasks. See campaignQueue.js.
       let dispatch;
       try {
-        dispatch = await dispatchCampaignQueue(db, campaignId, process.env.GCLOUD_PROJECT);
+        dispatch = await dispatchCampaignQueue(db, agencyId, campaignId, process.env.GCLOUD_PROJECT);
         logger.info("launchCampaign: dispatch triggered", { campaignId, ...dispatch });
       } catch (dispatchErr) {
         logger.error("launchCampaign: post-launch dispatch trigger failed, campaign remains queued", {
@@ -146,6 +149,10 @@ const launchCampaign = onRequest(
       if (err instanceof CampaignError) {
         const statusCode = err.code === "not_found" ? 404 : err.code === "failed_precondition" ? 409 : 400;
         res.status(statusCode).json({ error: err.message });
+        return;
+      }
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
         return;
       }
       logger.error("launchCampaign: failed", { error: err.message, stack: err.stack });

@@ -2,12 +2,14 @@ const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
-const { FB_VERIFY_TOKEN, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID } = require("./config");
+const { FB_VERIFY_TOKEN, WHATSAPP_CRED_ENC_KEY } = require("./config");
 const { createPhoneQueueTask } = require("./cloudTasks");
 const { enqueueInboxItem, tryAcquireLock } = require("./dispatcher");
 const { sendWhatsAppText } = require("./whatsapp");
 const { applyRecipientStatusUpdate, CampaignError } = require("./campaigns");
 const { recordWhatsAppSystemSend } = require("./metrics");
+const { agencyCollection, resolveAgencyIdForWebhook } = require("./tenancy");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 
 // PHASE 7 — non-text inputs must never be silently dropped. These are sent
 // directly from the webhook (no LLM call — this is a deterministic
@@ -95,6 +97,10 @@ async function handleMessageStatusUpdate(db, status) {
   const recipientDoc = matches.docs[0];
   const campaignId = recipientDoc.ref.parent.parent.id;
   const recipientId = recipientDoc.id;
+  // recipients -> campaign doc -> campaigns collection -> agency doc: the
+  // collectionGroup query above spans every agency, so the owning agencyId
+  // has to be read back off the matched doc's own path, not assumed.
+  const agencyId = recipientDoc.ref.parent.parent.parent.parent.id;
 
   const errorMessage =
     newRecipientStatus === "failed"
@@ -102,7 +108,7 @@ async function handleMessageStatusUpdate(db, status) {
       : undefined;
 
   try {
-    await applyRecipientStatusUpdate(db, campaignId, recipientId, newRecipientStatus, {
+    await applyRecipientStatusUpdate(db, agencyId, campaignId, recipientId, newRecipientStatus, {
       error: errorMessage,
       messageId: status.id,
     });
@@ -147,7 +153,7 @@ async function handleMessageStatusUpdate(db, status) {
  */
 const whatsappWebhook = onRequest(
   {
-    secrets: [FB_VERIFY_TOKEN, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID],
+    secrets: [FB_VERIFY_TOKEN, WHATSAPP_CRED_ENC_KEY],
     region: "us-central1",
   },
   async (req, res) => {
@@ -180,6 +186,35 @@ const whatsappWebhook = onRequest(
             const messages = value.messages || [];
             const statuses = value.statuses || [];
 
+            // MULTI-TENANCY: `value.metadata.phone_number_id` identifies
+            // which agency's WhatsApp Business number this delivery is for
+            // — resolved once per change via the same routing index
+            // leadsWebhook.js uses for Facebook Page IDs. See tenancy.js.
+            const agencyId = await resolveAgencyIdForWebhook(
+              db,
+              "waPhoneId",
+              value.metadata?.phone_number_id
+            );
+
+            // Loaded once per change (a batch of messages/statuses for the
+            // same phone_number_id, i.e. the same agency) rather than once
+            // per message — loadWhatsAppCredentials is itself cached, but no
+            // reason to hit even that cache repeatedly in a tight loop.
+            // `null` here just means "this agency's non-text acks and status
+            // updates will be skipped" — inbound TEXT messages are still
+            // enqueued below regardless (see the FIFO inbox section), since
+            // enqueueing never requires sending anything.
+            let creds = null;
+            try {
+              creds = await loadWhatsAppCredentials(db, agencyId);
+            } catch (err) {
+              if (err instanceof WhatsAppNotConnectedError) {
+                logger.warn("whatsappWebhook: agency has no connected WhatsApp account", { agencyId });
+              } else {
+                throw err;
+              }
+            }
+
             // Delivery/read/failed status updates for messages WE sent
             // (campaign sends in particular) — see handleMessageStatusUpdate
             // for why this used to be silently dropped.
@@ -197,7 +232,7 @@ const whatsappWebhook = onRequest(
               // Atomic check-and-set: guarantees only one concurrent webhook
               // delivery for this exact message id does anything with it,
               // even if Meta redelivers within the same instant.
-              const dedupeRef = db.collection("processedMessages").doc(message.id);
+              const dedupeRef = agencyCollection(db, agencyId, "processedMessages").doc(message.id);
               const alreadyEnqueued = await db.runTransaction(async (tx) => {
                 const snap = await tx.get(dedupeRef);
                 if (snap.exists) return true;
@@ -220,15 +255,16 @@ const whatsappWebhook = onRequest(
               if (message.type !== "text") {
                 const ackText = NON_TEXT_ACKS[message.type] || NON_TEXT_ACKS.unknown;
                 try {
-                  await sendWhatsAppText({
-                    to: phone,
-                    text: ackText,
-                    whatsappToken: WHATSAPP_TOKEN.value(),
-                    phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
-                  });
-                  await recordWhatsAppSystemSend(db);
-                  await db
-                    .collection("leads")
+                  if (creds) {
+                    await sendWhatsAppText({
+                      to: phone,
+                      text: ackText,
+                      whatsappToken: creds.whatsappToken,
+                      phoneNumberId: creds.phoneNumberId,
+                    });
+                    await recordWhatsAppSystemSend(db, agencyId);
+                  }
+                  await agencyCollection(db, agencyId, "leads")
                     .doc(phone)
                     .set(
                       {
@@ -269,15 +305,15 @@ const whatsappWebhook = onRequest(
               }
 
               // --- Text message: append to the phone's FIFO inbox ---
-              await enqueueInboxItem(db, phone, {
+              await enqueueInboxItem(db, agencyId, phone, {
                 messageId: message.id,
                 text,
                 contactName,
               });
 
-              const wonLock = await tryAcquireLock(db, phone);
+              const wonLock = await tryAcquireLock(db, agencyId, phone);
               if (wonLock) {
-                await createPhoneQueueTask(phone, projectId);
+                await createPhoneQueueTask(phone, agencyId, projectId);
                 logger.info("whatsappWebhook: acquired dispatcher lock, enqueued drain", {
                   phone,
                   messageId: message.id,

@@ -11,7 +11,8 @@
     "shell": "firebase functions:shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "seed-properties": "node scripts/seedProperties.js"
+    "seed-properties": "node scripts/seedProperties.js",
+    "backfill-member-claims": "node scripts/backfillMemberClaims.js"
   },
   "dependencies": {
     "@google-cloud/tasks": "^5.3.0",

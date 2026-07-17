@@ -5,13 +5,36 @@ const { defineSecret } = require("firebase-functions/params");
 // Firebase will inject them as env vars at runtime.
 
 const FB_VERIFY_TOKEN = defineSecret("FB_VERIFY_TOKEN");
+// FB_PAGE_ACCESS_TOKEN: legacy global secret. NO LONGER read by leadsWebhook.js
+// (or anything else) — each agency's own Facebook Page Access Token is now
+// loaded per-agency via facebookCredentials.js#loadFacebookCredentials, the
+// same "per-agency, not global" move WHATSAPP_TOKEN/etc. already went
+// through below. Kept declared only in case an existing single-tenant
+// deployment wants to carry its current Page forward as its first agency's
+// connection (paste the same value into the Settings > Facebook Lead Ads
+// Connect form) — not read by any function automatically.
 const FB_PAGE_ACCESS_TOKEN = defineSecret("FB_PAGE_ACCESS_TOKEN");
+// MULTI-TENANCY (per-agency WhatsApp): WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID /
+// WHATSAPP_BUSINESS_ACCOUNT_ID are NO LONGER read by any per-agency send/webhook/
+// template call site — those now load credentials per-agency via
+// whatsappCredentials.js#loadWhatsAppCredentials. These three secrets are kept
+// declared here ONLY as the migration fallback source for DEFAULT_AGENCY_ID
+// (see functions/scripts/migrateWhatsAppCredentials.js and tenancy.js) until
+// that one-time migration has run — do not add new call sites against them.
 const WHATSAPP_TOKEN = defineSecret("WHATSAPP_TOKEN");
 const WHATSAPP_PHONE_NUMBER_ID = defineSecret("WHATSAPP_PHONE_NUMBER_ID");
-// Needed only by syncTemplates.js — the message_templates API is scoped to
-// the WhatsApp Business Account, not the phone number, so this is a
-// separate ID from WHATSAPP_PHONE_NUMBER_ID above.
 const WHATSAPP_BUSINESS_ACCOUNT_ID = defineSecret("WHATSAPP_BUSINESS_ACCOUNT_ID");
+// WHATSAPP_CRED_ENC_KEY: 32-byte key (base64 or 64-char hex) used to encrypt
+// every agency's stored WhatsApp access token at rest — see
+// whatsappCredentials.js's encryptSecret/decryptSecret. Generate with:
+//   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+const WHATSAPP_CRED_ENC_KEY = defineSecret("WHATSAPP_CRED_ENC_KEY");
+// WHATSAPP_WELCOME_TEMPLATE / WHATSAPP_FOLLOWUP_TEMPLATE are now agency-level
+// SETTINGS (agencies/{agencyId}/settings/general.welcomeTemplateName /
+// .followupTemplateName), not secrets — each agency's own approved template
+// catalog differs, so a global template name no longer makes sense once
+// WhatsApp credentials are per-agency. Kept declared here only as the
+// DEFAULT_AGENCY_ID migration fallback, same as the three secrets above.
 const WHATSAPP_WELCOME_TEMPLATE = defineSecret("WHATSAPP_WELCOME_TEMPLATE");
 const WHATSAPP_FOLLOWUP_TEMPLATE = defineSecret("WHATSAPP_FOLLOWUP_TEMPLATE");
 const GROQ_API_KEY = defineSecret("GROQ_API_KEY");
@@ -166,6 +189,7 @@ module.exports = {
   WHATSAPP_TOKEN,
   WHATSAPP_PHONE_NUMBER_ID,
   WHATSAPP_BUSINESS_ACCOUNT_ID,
+  WHATSAPP_CRED_ENC_KEY,
   WHATSAPP_WELCOME_TEMPLATE,
   WHATSAPP_FOLLOWUP_TEMPLATE,
   GROQ_API_KEY,

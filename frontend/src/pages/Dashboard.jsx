@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { collection, getDocs, limit, onSnapshot, orderBy, query } from "firebase/firestore";
+import { getDocs, limit, onSnapshot, orderBy, query } from "firebase/firestore";
 import {
   Users,
   GitBranch,
@@ -17,7 +17,8 @@ import {
   DollarSign,
   Sparkles,
 } from "lucide-react";
-import { db } from "../firebase.js";
+import { campaignsCollection, leadsCollection, templatesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { useDashboardMetrics } from "../lib/useDashboardMetrics.js";
 import { dayKeyLabel } from "../lib/metricsPeriods.js";
 import { formatUSD, formatCount, toDate } from "../lib/format.js";
@@ -74,7 +75,8 @@ const CAMPAIGN_TIMELINE_TO_ACTIVITY = {
 };
 
 export default function Dashboard() {
-  const { allTime, allTimeLoading, today, todayLoading, month, series } = useDashboardMetrics();
+  const { agencyId } = useAuth();
+  const { allTime, allTimeLoading, today, todayLoading, month, series } = useDashboardMetrics(agencyId);
 
   const [recentCampaigns, setRecentCampaigns] = useState([]);
   const [campaignsLoading, setCampaignsLoading] = useState(true);
@@ -88,7 +90,12 @@ export default function Dashboard() {
   // already reads. Also feeds the activity timeline and the warnings below,
   // so this is the only campaign query the whole page needs.
   useEffect(() => {
-    const q = query(collection(db, "campaigns"), orderBy("createdAt", "desc"), limit(5));
+    if (!agencyId) {
+      setRecentCampaigns([]);
+      setCampaignsLoading(true);
+      return undefined;
+    }
+    const q = query(campaignsCollection(agencyId), orderBy("createdAt", "desc"), limit(5));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -98,18 +105,24 @@ export default function Dashboard() {
       () => setCampaignsLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   // Recent leads + templates — one-time reads (not live listeners) since
   // they only feed the supplementary activity feed, not a KPI that needs to
   // update mid-session. Bounded to 5 each.
   useEffect(() => {
+    if (!agencyId) {
+      setRecentLeads([]);
+      setRecentTemplates([]);
+      setActivitySourcesLoading(true);
+      return undefined;
+    }
     let cancelled = false;
     (async () => {
       try {
         const [leadsSnap, templatesSnap] = await Promise.all([
-          getDocs(query(collection(db, "leads"), orderBy("createdAt", "desc"), limit(5))),
-          getDocs(query(collection(db, "whatsappTemplates"), orderBy("createdAt", "desc"), limit(5))),
+          getDocs(query(leadsCollection(agencyId), orderBy("createdAt", "desc"), limit(5))),
+          getDocs(query(templatesCollection(agencyId), orderBy("createdAt", "desc"), limit(5))),
         ]);
         if (cancelled) return;
         setRecentLeads(leadsSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
@@ -121,7 +134,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agencyId]);
 
   // ── KPI derivations ──────────────────────────────────────────────────
   const runningCampaigns = (allTime.campaigns?.byStatus?.queued || 0) + (allTime.campaigns?.byStatus?.sending || 0);

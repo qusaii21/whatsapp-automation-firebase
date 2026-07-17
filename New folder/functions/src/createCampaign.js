@@ -4,6 +4,7 @@ const admin = require("firebase-admin");
 
 const { createCampaign: createCampaignDoc, CampaignError } = require("./campaigns");
 const { assertTemplateApprovedForCampaign } = require("./whatsappTemplates");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * Creates a new campaign in "draft" status. No recipients, no sending — this
@@ -32,17 +33,18 @@ const createCampaign = onRequest(
     }
 
     try {
+      const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
       const { name, description, type, templateName, templateLanguage } = req.body || {};
       const db = admin.firestore();
 
       if (typeof templateName === "string" && typeof templateLanguage === "string") {
-        await assertTemplateApprovedForCampaign(db, {
+        await assertTemplateApprovedForCampaign(db, agencyId, {
           templateName: templateName.trim(),
           templateLanguage: templateLanguage.trim(),
         });
       }
 
-      const { id, data } = await createCampaignDoc(db, {
+      const { id, data } = await createCampaignDoc(db, agencyId, {
         name,
         description,
         type,
@@ -55,6 +57,10 @@ const createCampaign = onRequest(
     } catch (err) {
       if (err instanceof CampaignError) {
         res.status(400).json({ error: err.message });
+        return;
+      }
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
         return;
       }
       logger.error("createCampaign: failed", { error: err.message, stack: err.stack });

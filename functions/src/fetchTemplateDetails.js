@@ -2,8 +2,8 @@ const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
-const { WHATSAPP_TOKEN } = require("./config");
-const { getTemplateDetails, refreshSingleTemplate, TemplateError } = require("./whatsappTemplates");
+const { getTemplateDetails, TemplateError } = require("./whatsappTemplates");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * GET /fetchTemplateDetails?templateId=<META_TEMPLATE_ID>
@@ -26,7 +26,6 @@ const fetchTemplateDetails = onRequest(
   {
     region: "us-central1",
     cors: true,
-    secrets: [WHATSAPP_TOKEN],
   },
   async (req, res) => {
     if (req.method !== "GET") {
@@ -41,13 +40,18 @@ const fetchTemplateDetails = onRequest(
     }
 
     try {
+      const { agencyId } = await requireAuthContext(req);
       const db = admin.firestore();
-      const template = await getTemplateDetails(db, { templateId });
+      const template = await getTemplateDetails(db, agencyId, { templateId });
       res.status(200).json(template);
     } catch (err) {
       if (err instanceof TemplateError) {
         const statusCode = err.code === "not_found" ? 404 : 400;
         res.status(statusCode).json({ error: err.message });
+        return;
+      }
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
         return;
       }
       logger.error("fetchTemplateDetails: unexpected error", { error: err.message, stack: err.stack });

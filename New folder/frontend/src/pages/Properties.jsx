@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { addDoc, collection, deleteDoc, doc, onSnapshot, updateDoc } from "firebase/firestore";
+import { addDoc, deleteDoc, onSnapshot, updateDoc } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes, deleteObject } from "firebase/storage";
 import { Search, Plus, X, Star, BedDouble, Bath, Ruler, MapPin, Trash2, Pencil } from "lucide-react";
-import { db, storage } from "../firebase.js";
+import { storage } from "../firebase.js";
+import { propertiesCollection, propertyDoc } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import {
   PROPERTY_TYPES,
   LISTING_TYPES,
@@ -79,6 +81,7 @@ function csvToArray(v) {
 }
 
 export default function Properties() {
+  const { agencyId } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -95,8 +98,13 @@ export default function Properties() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!agencyId) {
+      setProperties([]);
+      setLoading(true);
+      return undefined;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, "properties"),
+      propertiesCollection(agencyId),
       (snapshot) => {
         setProperties(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
         setLoading(false);
@@ -104,7 +112,7 @@ export default function Properties() {
       () => setLoading(false)
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   // Deep link from the Dashboard's "Add Property" quick action.
   useEffect(() => {
@@ -245,10 +253,11 @@ export default function Properties() {
         updatedAt: new Date(),
       };
 
+      if (!agencyId) return;
       if (editingId) {
-        await updateDoc(doc(db, "properties", editingId), payload);
+        await updateDoc(propertyDoc(agencyId, editingId), payload);
       } else {
-        await addDoc(collection(db, "properties"), { ...payload, createdAt: new Date() });
+        await addDoc(propertiesCollection(agencyId), { ...payload, createdAt: new Date() });
       }
       closeDrawer();
     } finally {
@@ -257,6 +266,7 @@ export default function Properties() {
   }
 
   async function handleDelete(property) {
+    if (!agencyId) return;
     if (!confirm(`Delete "${property.projectName}"?`)) return;
     for (const url of property.images || []) {
       try {
@@ -265,7 +275,7 @@ export default function Properties() {
         // best-effort cleanup only
       }
     }
-    await deleteDoc(doc(db, "properties", property.id));
+    await deleteDoc(propertyDoc(agencyId, property.id));
   }
 
   return (

@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { doc, updateDoc } from "firebase/firestore";
+import { updateDoc } from "firebase/firestore";
 import { X, Phone, ExternalLink } from "lucide-react";
-import { db } from "../firebase.js";
+import { leadDoc } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import Avatar from "./Avatar.jsx";
 import ScoreRing from "./ScoreRing.jsx";
 import { scoreLead, scoreTier, tierLabel } from "../lib/leadScore.js";
@@ -96,13 +97,16 @@ export default function CustomerPanel({
   onSelectOpportunity = () => {},
   onClose,
 }) {
+  const { agencyId } = useAuth();
+
   if (!lead) return null;
 
   const score = scoreLead(lead);
   const tier = scoreTier(score);
 
   function save(field, value) {
-    updateDoc(doc(db, "leads", lead.id), { [field]: value }).catch((err) =>
+    if (!agencyId) return;
+    updateDoc(leadDoc(agencyId, lead.id), { [field]: value }).catch((err) =>
       console.error("Failed to update lead field", field, err)
     );
   }

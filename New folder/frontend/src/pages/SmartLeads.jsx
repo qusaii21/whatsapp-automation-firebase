@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, onSnapshot, query, getDocs } from "firebase/firestore"; // Added getDocs
+import { onSnapshot, query, getDocs } from "firebase/firestore"; // Added getDocs
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, LayoutGrid, Kanban, PhoneCall } from "lucide-react";
-import { db } from "../firebase.js";
+import { leadsCollection, opportunitiesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import Avatar from "../components/Avatar.jsx";
 import ScoreRing from "../components/ScoreRing.jsx";
 import PipelineBoard from "../components/PipelineBoard.jsx";
@@ -106,6 +107,7 @@ function CustomerGroup({ lead, opportunities, onOpen }) {
 }
 
 export default function SmartLeads() {
+  const { agencyId } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [leads, setLeads] = useState([]);
@@ -116,7 +118,12 @@ export default function SmartLeads() {
   const [opportunitiesByLead, setOpportunitiesByLead] = useState({});
 
   useEffect(() => {
-    const q = query(collection(db, "leads"));
+    if (!agencyId) {
+      setLeads([]);
+      setLoading(true);
+      return undefined;
+    }
+    const q = query(leadsCollection(agencyId));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -129,7 +136,7 @@ export default function SmartLeads() {
       () => setLoading(false)
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   const leadIdsKey = useMemo(() => leads.map((l) => l.id).join(","), [leads]);
 
@@ -140,7 +147,7 @@ export default function SmartLeads() {
     console.log("Creating opportunity listeners", ids);
     const unsubscribers = ids.map((id) => {
       console.log("Listening to", `leads/${id}/opportunities`);
-      const q = query(collection(db, "leads", id, "opportunities"));
+      const q = query(opportunitiesCollection(agencyId, id));
       return onSnapshot(
         q,
         (snapshot) => {
@@ -162,7 +169,7 @@ export default function SmartLeads() {
 
   // Debugging Hook: Manual Fetch Verification
   useEffect(() => {
-    if (!leads.length) {
+    if (!agencyId || !leads.length) {
       setOpportunitiesByLead({});
       return;
     }
@@ -175,7 +182,7 @@ export default function SmartLeads() {
         console.log(`Fetching opportunities for ${lead.id} (${lead.name})`);
         try {
           const snapshot = await getDocs(
-            collection(db, "leads", lead.id, "opportunities")
+            opportunitiesCollection(agencyId, lead.id)
           );
           console.log(`Found ${snapshot.size} opportunities for ${lead.id}`);
           const rows = snapshot.docs.map((doc) => ({
@@ -196,7 +203,7 @@ export default function SmartLeads() {
     }
 
     loadOpportunities();
-  }, [leads]);
+  }, [agencyId, leads]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();

@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { collection, doc, onSnapshot, updateDoc } from "firebase/firestore";
+import { onSnapshot } from "firebase/firestore";
 import {
   FileText, RefreshCw, Search, X, Plus, ChevronDown, ChevronUp,
   AlertCircle, Phone, ExternalLink, Copy, MessageSquare, RotateCcw,
   Info, GripVertical, Trash2, CheckCircle,
 } from "lucide-react";
-import { db } from "../firebase.js";
+import { templatesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { formatDateTime, sortByRecency } from "../lib/format.js";
-import { functionsBaseUrl } from "../lib/functions.js";
+import { authedFetch } from "../lib/functions.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -647,7 +648,7 @@ function CreateTemplateDrawer({ onClose, onCreated }) {
     setServerError(null);
     try {
       const components = buildComponentsPayload(form);
-      const res = await fetch(`${functionsBaseUrl()}/createTemplate`, {
+      const res = await authedFetch("/createTemplate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1059,6 +1060,7 @@ function TemplateDetailDrawer({ template, onClose, onRefresh, refreshing }) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Templates() {
+  const { agencyId } = useAuth();
   const [searchParams, setSearchParams]   = useSearchParams();
   const [templates, setTemplates]         = useState([]);
   const [loading, setLoading]             = useState(true);
@@ -1070,6 +1072,28 @@ export default function Templates() {
   const [createOpen, setCreateOpen]       = useState(false);
   const [refreshingId, setRefreshingId]   = useState(null);
   const [toast, setToast]                 = useState(null);
+  const [waConnected, setWaConnected]     = useState(true); // optimistic until checked, avoids a flash of the banner
+
+  // Cheap status check — not a live listener, integrations/whatsapp isn't
+  // client-readable anyway (see firestore.rules); getIntegrationStatus is
+  // the one Cloud Function that returns a credential-free projection of it.
+  useEffect(() => {
+    if (!agencyId) return;
+    let cancelled = false;
+    authedFetch("/getIntegrationStatus", { method: "GET" })
+      .then((res) => res.json())
+      .then((body) => {
+        if (!cancelled) setWaConnected(!!body.connected && body.accountStatus === "CONNECTED");
+      })
+      .catch(() => {
+        // Network hiccup — don't block the page on this, just leave the
+        // optimistic default and let Sync/Create's own error surface if
+        // the connection is actually the problem.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agencyId]);
 
   // Deep link from the Dashboard's "Create Template" quick action.
   useEffect(() => {
@@ -1082,8 +1106,13 @@ export default function Templates() {
 
   // Live Firestore listener
   useEffect(() => {
+    if (!agencyId) {
+      setTemplates([]);
+      setLoading(true);
+      return undefined;
+    }
     const unsub = onSnapshot(
-      collection(db, "whatsappTemplates"),
+      templatesCollection(agencyId),
       (snap) => {
         const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
         setTemplates(docs);
@@ -1098,7 +1127,7 @@ export default function Templates() {
       () => setLoading(false)
     );
     return unsub;
-  }, []);
+  }, [agencyId]);
 
   // Auto-dismiss toast after 6 s
   useEffect(() => {
@@ -1130,7 +1159,7 @@ export default function Templates() {
   async function handleSync() {
     setSyncing(true);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/syncTemplates`, { method: "POST" });
+      const res = await authedFetch("/syncTemplates", { method: "POST" });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `Error ${res.status}`);
       setToast({ type: "success", message: `Sync complete — ${summarizeSyncResult(body)}` });
@@ -1144,7 +1173,7 @@ export default function Templates() {
   async function handleRefresh(templateId) {
     setRefreshingId(templateId);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/refreshTemplate`, {
+      const res = await authedFetch("/refreshTemplate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ templateId }),
@@ -1187,6 +1216,13 @@ export default function Templates() {
           </button>
         </div>
       </div>
+
+      {!waConnected && (
+        <div className="auth-error" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+          <span>No WhatsApp Business Account connected — templates can't be synced or sent until you connect one.</span>
+          <a className="btn btn-sm" href="/settings">Go to Settings</a>
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="campaigns-toolbar" style={{ flexDirection: "column", alignItems: "flex-start", gap: 10 }}>

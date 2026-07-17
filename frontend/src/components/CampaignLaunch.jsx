@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { collection, query, where, limit, onSnapshot } from "firebase/firestore";
+import { query, where, limit, onSnapshot } from "firebase/firestore";
 import { Rocket, History, ShieldAlert, CircleCheck, CirclePlus, Send, CheckCheck, Ban, XCircle } from "lucide-react";
-import { db } from "../firebase.js";
-import { functionsBaseUrl } from "../lib/functions.js";
+import { templatesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
+import { authedFetch } from "../lib/functions.js";
 import { formatDateTime } from "../lib/format.js";
 
 /**
@@ -86,6 +87,7 @@ function Timeline({ timeline }) {
 }
 
 export default function CampaignLaunch({ campaignId, campaign }) {
+  const { agencyId } = useAuth();
   const [template, setTemplate] = useState(null);
   const [templateLoaded, setTemplateLoaded] = useState(false);
   const [launching, setLaunching] = useState(false);
@@ -96,13 +98,13 @@ export default function CampaignLaunch({ campaignId, campaign }) {
   // reasons can reflect the same template the server will check.
   useEffect(() => {
     setTemplateLoaded(false);
-    if (!campaign?.templateName || !campaign?.templateLanguage) {
+    if (!agencyId || !campaign?.templateName || !campaign?.templateLanguage) {
       setTemplate(null);
       setTemplateLoaded(true);
       return undefined;
     }
     const q = query(
-      collection(db, "whatsappTemplates"),
+      templatesCollection(agencyId),
       where("name", "==", campaign.templateName),
       where("language", "==", campaign.templateLanguage),
       limit(1)
@@ -116,7 +118,7 @@ export default function CampaignLaunch({ campaignId, campaign }) {
       () => setTemplateLoaded(true)
     );
     return unsubscribe;
-  }, [campaign?.templateName, campaign?.templateLanguage]);
+  }, [agencyId, campaign?.templateName, campaign?.templateLanguage]);
 
   if (!campaign) return null;
 
@@ -144,7 +146,7 @@ export default function CampaignLaunch({ campaignId, campaign }) {
     setLaunching(true);
     setLaunchErrors(null);
     try {
-      const res = await fetch(`${functionsBaseUrl()}/launchCampaign`, {
+      const res = await authedFetch("/launchCampaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ campaignId, launchedBy: "web" }),

@@ -3,6 +3,7 @@ const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
 const { addRecipientsToCampaign, CampaignError } = require("./campaigns");
+const { requireAuthContext, AuthError } = require("./auth");
 
 /**
  * Adds recipients to a campaign that is still in "draft" status. Purely a
@@ -20,6 +21,7 @@ const addCampaignRecipients = onRequest(
     }
 
     try {
+      const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin"] });
       const { campaignId, recipients } = req.body || {};
 
       if (!campaignId || typeof campaignId !== "string") {
@@ -28,7 +30,7 @@ const addCampaignRecipients = onRequest(
       }
 
       const db = admin.firestore();
-      const result = await addRecipientsToCampaign(db, campaignId, recipients);
+      const result = await addRecipientsToCampaign(db, agencyId, campaignId, recipients);
 
       logger.info("addCampaignRecipients: done", { campaignId, ...result });
       res.status(200).json(result);
@@ -36,6 +38,10 @@ const addCampaignRecipients = onRequest(
       if (err instanceof CampaignError) {
         const statusCode = err.code === "not_found" ? 404 : 400;
         res.status(statusCode).json({ error: err.message });
+        return;
+      }
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
         return;
       }
       logger.error("addCampaignRecipients: failed", { error: err.message, stack: err.stack });

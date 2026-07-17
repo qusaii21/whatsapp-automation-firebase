@@ -5,15 +5,15 @@ const axios = require("axios");
 
 const {
   FB_VERIFY_TOKEN,
-  FB_PAGE_ACCESS_TOKEN,
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_NUMBER_ID,
-  WHATSAPP_WELCOME_TEMPLATE,
+  WHATSAPP_CRED_ENC_KEY,
   GRAPH_API_VERSION,
 } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
 const { createFollowupTask } = require("./cloudTasks");
 const { recordLeadCreated, recordWhatsAppSystemSend } = require("./metrics");
+const { agencyCollection, agencySettingsRef, resolveAgencyIdForWebhook } = require("./tenancy");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
+const { loadFacebookCredentials, FacebookNotConnectedError } = require("./facebookCredentials");
 
 /**
  * Fetches the full field data for a lead from the Graph API and pulls out
@@ -42,13 +42,7 @@ async function fetchLeadDetails(leadgenId, pageAccessToken) {
 
 const leadsWebhook = onRequest(
   {
-    secrets: [
-      FB_VERIFY_TOKEN,
-      FB_PAGE_ACCESS_TOKEN,
-      WHATSAPP_TOKEN,
-      WHATSAPP_PHONE_NUMBER_ID,
-      WHATSAPP_WELCOME_TEMPLATE,
-    ],
+    secrets: [FB_VERIFY_TOKEN, WHATSAPP_CRED_ENC_KEY],
     region: "us-central1",
   },
   async (req, res) => {
@@ -81,13 +75,21 @@ const leadsWebhook = onRequest(
         const projectId = process.env.GCLOUD_PROJECT;
 
         for (const entry of body.entry || []) {
+          // MULTI-TENANCY: `entry.id` is the Facebook Page ID this leadgen
+          // event came in on. Each agency registers its own Page ID via
+          // tenancy.js's setAgencyRouting (a follow-up onboarding phase) —
+          // resolving it here is what lets ALL of this webhook's Firestore
+          // writes below land under the correct `agencies/{agencyId}/...`
+          // subtree instead of a shared global one. See tenancy.js's header
+          // for why this falls back to DEFAULT_AGENCY_ID today.
+          const db = admin.firestore();
+          const agencyId = await resolveAgencyIdForWebhook(db, "fbPageId", entry.id);
+
           for (const change of entry.changes || []) {
             if (change.field !== "leadgen") continue;
 
             const { leadgen_id: leadgenId } = change.value || {};
             if (!leadgenId) continue;
-
-            const db = admin.firestore();
 
             // Meta redelivers leadgen webhooks (on slow responses, retries,
             // occasional dupes) exactly like it does message webhooks. This
@@ -99,7 +101,7 @@ const leadsWebhook = onRequest(
             // chatting, silently wiping their conversation. Guard the whole
             // thing with the same atomic claim pattern used for inbound
             // messages, keyed by leadgen_id.
-            const dedupeRef = db.collection("processedLeadgenEvents").doc(leadgenId);
+            const dedupeRef = agencyCollection(db, agencyId, "processedLeadgenEvents").doc(leadgenId);
             const alreadyHandled = await db.runTransaction(async (tx) => {
               const dedupeSnap = await tx.get(dedupeRef);
               if (dedupeSnap.exists) return true;
@@ -114,17 +116,37 @@ const leadsWebhook = onRequest(
               continue;
             }
 
-            const { name, phone } = await fetchLeadDetails(
-              leadgenId,
-              FB_PAGE_ACCESS_TOKEN.value()
-            );
+            // MULTI-TENANCY: fetch this lead's details using THIS agency's
+            // own connected Facebook Page — not a global page token (see
+            // facebookCredentials.js). A lead can only be created once we
+            // have its name/phone from this call, so if the agency hasn't
+            // connected a Facebook Page yet (or its token has gone bad),
+            // there is nothing to create yet; log and move on rather than
+            // throwing (Meta would otherwise retry-storm this delivery).
+            let pageAccessToken;
+            try {
+              const fbCreds = await loadFacebookCredentials(db, agencyId);
+              pageAccessToken = fbCreds.pageAccessToken;
+            } catch (err) {
+              if (err instanceof FacebookNotConnectedError) {
+                logger.warn("leadsWebhook: agency has no connected Facebook Page, skipping leadgen event", {
+                  agencyId,
+                  pageId: entry.id,
+                  leadgenId,
+                });
+                continue;
+              }
+              throw err;
+            }
+
+            const { name, phone } = await fetchLeadDetails(leadgenId, pageAccessToken);
 
             if (!phone) {
               logger.error("leadsWebhook: lead had no phone number", { leadgenId });
               continue;
             }
 
-            const leadRef = db.collection("leads").doc(phone);
+            const leadRef = agencyCollection(db, agencyId, "leads").doc(phone);
             const existingSnap = await leadRef.get();
 
             // Only initialize conversationHistory for a brand-new lead —
@@ -146,22 +168,57 @@ const leadsWebhook = onRequest(
             // a one-time event per leadgen_id, so this fires exactly once per
             // real new lead — see metrics.js's IDEMPOTENCY note.
             if (isNewLead) {
-              await recordLeadCreated(db);
+              await recordLeadCreated(db, agencyId);
             }
 
-            // 1. Send the WhatsApp welcome template.
-            await sendWhatsAppTemplate({
-              to: phone,
-              templateName: WHATSAPP_WELCOME_TEMPLATE.value(),
-              whatsappToken: WHATSAPP_TOKEN.value(),
-              phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
-            });
-            await recordWhatsAppSystemSend(db, "utility");
+            // 1. Send the WhatsApp welcome template — using THIS agency's
+            // own connected WhatsApp Business Account and its own approved
+            // welcome template, not a global one. A lead is still created
+            // even if the agency's WhatsApp isn't connected/configured yet
+            // (so nothing is lost), it just won't get an automatic welcome
+            // message or follow-up until that's fixed.
+            let sentWelcome = false;
+            try {
+              const creds = await loadWhatsAppCredentials(db, agencyId);
+              const settingsSnap = await agencySettingsRef(db, agencyId).get();
+              const welcomeTemplateName = settingsSnap.exists
+                ? settingsSnap.data()?.welcomeTemplateName
+                : null;
 
-            // 2. Schedule exactly one follow-up check, 24h from now.
-            await createFollowupTask(phone, projectId);
+              if (!welcomeTemplateName) {
+                logger.warn("leadsWebhook: no welcome template configured for agency, skipping send", {
+                  agencyId,
+                  phone,
+                });
+              } else {
+                await sendWhatsAppTemplate({
+                  to: phone,
+                  templateName: welcomeTemplateName,
+                  whatsappToken: creds.whatsappToken,
+                  phoneNumberId: creds.phoneNumberId,
+                });
+                await recordWhatsAppSystemSend(db, agencyId, "utility");
+                sentWelcome = true;
+              }
+            } catch (err) {
+              if (err instanceof WhatsAppNotConnectedError) {
+                logger.warn("leadsWebhook: agency has no connected WhatsApp account, skipping welcome send", {
+                  agencyId,
+                  phone,
+                });
+              } else {
+                throw err;
+              }
+            }
 
-            logger.info("leadsWebhook: processed new lead", { phone });
+            // 2. Schedule exactly one follow-up check, 24h from now — only
+            // if the welcome actually went out; otherwise there's nothing
+            // for followupCheck.js to have followed up ON yet.
+            if (sentWelcome) {
+              await createFollowupTask(phone, agencyId, projectId);
+            }
+
+            logger.info("leadsWebhook: processed new lead", { phone, agencyId });
           }
         }
 

@@ -3,9 +3,8 @@ const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
 const {
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_NUMBER_ID,
   GROQ_API_KEY,
+  WHATSAPP_CRED_ENC_KEY,
   PHONE_QUEUE_TIMEOUT_SECONDS,
   TIME_BUDGET_BUFFER_MS,
   MAX_ITEM_ATTEMPTS,
@@ -23,6 +22,8 @@ const {
   hydratePropertiesShared,
 } = require("./opportunities");
 const { recordAIMessageSent, recordWhatsAppSystemSend, recordLlmUsage } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 
 /**
  * PHASE 1/4/6/9 — this is the drain loop for one phone's message queue.
@@ -47,22 +48,46 @@ const { recordAIMessageSent, recordWhatsAppSystemSend, recordLlmUsage } = requir
  */
 const processPhoneQueue = onRequest(
   {
-    secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, GROQ_API_KEY],
+    secrets: [WHATSAPP_CRED_ENC_KEY, GROQ_API_KEY],
     region: "us-central1",
     invoker: "private",
     timeoutSeconds: PHONE_QUEUE_TIMEOUT_SECONDS,
   },
   async (req, res) => {
     const startedAt = Date.now();
-    const { phone } = req.body || {};
-    if (!phone) {
-      res.status(400).send("Missing phone in task payload");
+    const { phone, agencyId } = req.body || {};
+    if (!phone || !agencyId) {
+      res.status(400).send("Missing phone/agencyId in task payload");
       return;
     }
 
     const db = admin.firestore();
     const projectId = process.env.GCLOUD_PROJECT;
     let itemsProcessedThisInvocation = 0;
+
+    // Loaded ONCE per invocation (not per inbox item) — loadWhatsAppCredentials
+    // is itself cached (see whatsappCredentials.js), but there's no reason to
+    // even hit that cache repeatedly inside a single drain loop.
+    let creds;
+    try {
+      creds = await loadWhatsAppCredentials(db, agencyId);
+    } catch (err) {
+      if (err instanceof WhatsAppNotConnectedError) {
+        // This agency disconnected (or was never connected) mid-queue — no
+        // point retrying a send that will fail every time. Release the lock
+        // so the queue doesn't wedge forever holding a dead agency's inbox;
+        // the items themselves stay queued and will be picked up the moment
+        // the agency reconnects and a new webhook delivery wins the lock.
+        await tryReleaseLock(db, agencyId, phone);
+        logger.warn("processPhoneQueue: agency has no connected WhatsApp account, stopping drain", {
+          agencyId,
+          phone,
+        });
+        res.sendStatus(200);
+        return;
+      }
+      throw err;
+    }
 
     try {
       // eslint-disable-next-line no-constant-condition
@@ -79,15 +104,15 @@ const processPhoneQueue = onRequest(
             phone,
             itemsProcessedThisInvocation,
           });
-          await createPhoneQueueTask(phone, projectId);
+          await createPhoneQueueTask(phone, agencyId, projectId);
           res.sendStatus(200);
           return;
         }
 
-        const snap = await inboxCollection(db, phone).orderBy("receivedAt").limit(1).get();
+        const snap = await inboxCollection(db, agencyId, phone).orderBy("receivedAt").limit(1).get();
 
         if (snap.empty) {
-          const { released } = await tryReleaseLock(db, phone);
+          const { released } = await tryReleaseLock(db, agencyId, phone);
           if (released) {
             logger.info("processPhoneQueue: inbox empty, lock released, done", {
               phone,
@@ -106,7 +131,7 @@ const processPhoneQueue = onRequest(
         const messageId = itemDoc.id;
         const item = itemDoc.data();
 
-        const outcome = await processOneMessage({ db, phone, messageId, item });
+        const outcome = await processOneMessage({ db, agencyId, phone, messageId, item, creds });
         itemsProcessedThisInvocation += 1;
 
         if (outcome.stopDraining) {
@@ -127,7 +152,7 @@ const processPhoneQueue = onRequest(
           return;
         }
 
-        await heartbeatLock(db, phone);
+        await heartbeatLock(db, agencyId, phone);
       }
     } catch (err) {
       // This is a genuinely unexpected failure OUTSIDE processOneMessage's
@@ -156,11 +181,11 @@ const processPhoneQueue = onRequest(
  * from this phone too, which is exactly the "one bad message wedges the
  * conversation forever" failure mode Phase 4 exists to prevent).
  */
-async function processOneMessage({ db, phone, messageId, item }) {
+async function processOneMessage({ db, agencyId, phone, messageId, item, creds }) {
   const turnStartedAt = Date.now();
-  const msgRef = db.collection("processedMessages").doc(messageId);
-  const leadRef = db.collection("leads").doc(phone);
-  const itemRef = inboxCollection(db, phone).doc(messageId);
+  const msgRef = agencyCollection(db, agencyId, "processedMessages").doc(messageId);
+  const leadRef = agencyCollection(db, agencyId, "leads").doc(phone);
+  const itemRef = inboxCollection(db, agencyId, phone).doc(messageId);
 
   try {
     await itemRef.set({ status: "processing" }, { merge: true });
@@ -252,7 +277,7 @@ async function processOneMessage({ db, phone, messageId, item }) {
     // runs) — see opportunities.js for why this doc exists and how the
     // shownProperty exclusion list is scoped to it rather than the whole
     // customer's lifetime history.
-    const oppCol = opportunitiesCollection(db, phone);
+    const oppCol = opportunitiesCollection(db, agencyId, phone);
     let activeOpportunitySnap = null;
     if (lead.activeOpportunityId) {
       activeOpportunitySnap = await oppCol.doc(lead.activeOpportunityId).get();
@@ -268,12 +293,13 @@ async function processOneMessage({ db, phone, messageId, item }) {
       ? activeOpportunityData.shownPropertyIds || []
       : lead.shownPropertyIds || [];
     const opportunityShownProperties = activeOpportunityData
-      ? await hydratePropertiesShared(db, activeOpportunityData.propertiesShared)
+      ? await hydratePropertiesShared(db, agencyId, activeOpportunityData.propertiesShared)
       : shownProperties;
 
     let agentResult = cached?.agentResult || null;
     if (!agentResult) {
       agentResult = await runAgent({
+        agencyId,
         leadName: lead.name,
         conversationHistory: updatedHistory,
         shownPropertyIds: opportunityShownPropertyIds,
@@ -288,22 +314,22 @@ async function processOneMessage({ db, phone, messageId, item }) {
       // re-enters this block, so this turn's Groq token usage/cost is never
       // double-counted. See agent.js's `_meta.llmUsage` and metrics.js's
       // recordLlmUsage.
-      await recordLlmUsage(db, agentResult._meta?.llmUsage);
+      await recordLlmUsage(db, agencyId, agentResult._meta?.llmUsage);
     }
 
     if (!cached?.textSent) {
       await sendWhatsAppText({
         to: phone,
         text: agentResult.response,
-        whatsappToken: WHATSAPP_TOKEN.value(),
-        phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+        whatsappToken: creds.whatsappToken,
+        phoneNumberId: creds.phoneNumberId,
       });
       await msgRef.set({ textSent: true }, { merge: true });
       // METRICS: gated by the same `cached?.textSent` check that already
       // makes the send itself exactly-once across retries/redeliveries of
       // this messageId — a retry after this point sees `textSent: true` and
       // never re-enters this block.
-      await recordAIMessageSent(db);
+      await recordAIMessageSent(db, agencyId);
     }
 
     const assistantTurn =
@@ -386,6 +412,7 @@ async function processOneMessage({ db, phone, messageId, item }) {
     if (!opportunityId) {
       const resolution = await resolveActiveOpportunity({
         db,
+        agencyId,
         phone,
         activeOpportunityId: lead.activeOpportunityId || null,
         activeSnap: activeOpportunitySnap,
@@ -451,7 +478,7 @@ async function processOneMessage({ db, phone, messageId, item }) {
 
     if (agentResult.propertyFound && agentResult.matchedPropertyId) {
       try {
-        const propSnap = await db.collection("properties").doc(agentResult.matchedPropertyId).get();
+        const propSnap = await agencyCollection(db, agencyId, "properties").doc(agentResult.matchedPropertyId).get();
         if (propSnap.exists) {
           const property = propSnap.data();
           extractedUpdates.lastMatchedPropertyId = agentResult.matchedPropertyId;
@@ -495,14 +522,14 @@ async function processOneMessage({ db, phone, messageId, item }) {
               to: phone,
               imageUrl: primaryImage,
               caption,
-              whatsappToken: WHATSAPP_TOKEN.value(),
-              phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+              whatsappToken: creds.whatsappToken,
+              phoneNumberId: creds.phoneNumberId,
             });
             await msgRef.set({ imageSent: true }, { merge: true });
             // METRICS: a second, distinct WhatsApp Cloud API send for this
             // same turn — counted in the overall WhatsApp total but not
             // double-counted as a second "AI message" (see metrics.js).
-            await recordWhatsAppSystemSend(db);
+            await recordWhatsAppSystemSend(db, agencyId);
           }
         }
       } catch (imgErr) {
@@ -550,6 +577,7 @@ async function processOneMessage({ db, phone, messageId, item }) {
   } catch (err) {
     const { stopDraining } = await handleItemFailure({
       db,
+      agencyId,
       phone,
       messageId,
       item,
@@ -569,7 +597,7 @@ async function processOneMessage({ db, phone, messageId, item }) {
  * message must not be able to wedge every other queued message from the
  * same phone, and must not silently vanish either.
  */
-async function handleItemFailure({ db, phone, messageId, item, itemRef, err, turnStartedAt }) {
+async function handleItemFailure({ db, agencyId, phone, messageId, item, itemRef, err, turnStartedAt }) {
   const attempts = (item.attempts || 0) + 1;
   const projectId = process.env.GCLOUD_PROJECT;
 
@@ -589,14 +617,14 @@ async function handleItemFailure({ db, phone, messageId, item, itemRef, err, tur
     // messages again, but keep it (in deadLetters, not deleted) so it's
     // visible for a human to look at, and flag the lead itself.
     const batch = db.batch();
-    batch.set(db.collection("leads").doc(phone).collection("deadLetters").doc(messageId), {
+    batch.set(agencyCollection(db, agencyId, "leads").doc(phone).collection("deadLetters").doc(messageId), {
       ...item,
       attempts,
       lastError: err.message,
       deadLetteredAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     batch.set(
-      db.collection("leads").doc(phone),
+      agencyCollection(db, agencyId, "leads").doc(phone),
       { needsHumanAttention: true, lastDeadLetterAt: admin.firestore.FieldValue.serverTimestamp() },
       { merge: true }
     );
@@ -621,7 +649,7 @@ async function handleItemFailure({ db, phone, messageId, item, itemRef, err, tur
     RETRY_BACKOFF_BASE_SECONDS * 2 ** (attempts - 1),
     RETRY_BACKOFF_MAX_SECONDS
   );
-  await createPhoneQueueTask(phone, projectId, backoffSeconds);
+  await createPhoneQueueTask(phone, agencyId, projectId, backoffSeconds);
   // Tell the caller to stop draining and return 200 (see the loop's
   // handling of stopDraining for why this must NOT be surfaced as a 500).
   return { stopDraining: true };

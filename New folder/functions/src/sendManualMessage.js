@@ -2,9 +2,12 @@ const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
-const { WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID } = require("./config");
+const { WHATSAPP_CRED_ENC_KEY } = require("./config");
 const { sendWhatsAppText } = require("./whatsapp");
 const { recordHumanMessageSent } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
+const { requireAuthContext, AuthError } = require("./auth");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 
 /**
  * HUMAN AGENT MODE — manual send endpoint.
@@ -48,7 +51,7 @@ const { recordHumanMessageSent } = require("./metrics");
  */
 const sendManualMessage = onRequest(
   {
-    secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID],
+    secrets: [WHATSAPP_CRED_ENC_KEY],
     region: "us-central1",
     cors: true,
   },
@@ -59,6 +62,7 @@ const sendManualMessage = onRequest(
     }
 
     try {
+      const { agencyId } = await requireAuthContext(req, { roles: ["owner", "admin", "agent"] });
       const { phone, text } = req.body || {};
 
       if (!phone || typeof phone !== "string") {
@@ -72,20 +76,22 @@ const sendManualMessage = onRequest(
         return;
       }
 
+      const db = admin.firestore();
+      const creds = await loadWhatsAppCredentials(db, agencyId);
+
       // Send first — if the WhatsApp Cloud API call fails, we don't want a
       // message sitting in the CRM's history claiming it was delivered.
       await sendWhatsAppText({
         to: phone,
         text: trimmedText,
-        whatsappToken: WHATSAPP_TOKEN.value(),
-        phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+        whatsappToken: creds.whatsappToken,
+        phoneNumberId: creds.phoneNumberId,
       });
 
-      const db = admin.firestore();
       // METRICS: one HTTP call -> one send -> one metrics update, same
       // one-shot posture as this endpoint's own Firestore write below.
-      await recordHumanMessageSent(db);
-      const leadRef = db.collection("leads").doc(phone);
+      await recordHumanMessageSent(db, agencyId);
+      const leadRef = agencyCollection(db, agencyId, "leads").doc(phone);
 
       const turn = {
         role: "assistant",
@@ -112,6 +118,14 @@ const sendManualMessage = onRequest(
       logger.info("sendManualMessage: sent", { phone });
       res.status(200).json({ ok: true, turn });
     } catch (err) {
+      if (err instanceof AuthError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      if (err instanceof WhatsAppNotConnectedError) {
+        res.status(409).json({ error: err.message, code: "not_connected" });
+        return;
+      }
       logger.error("sendManualMessage: failed", {
         error: err.message,
         stack: err.stack,

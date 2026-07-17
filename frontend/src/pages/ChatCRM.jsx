@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, doc, onSnapshot, orderBy, query, updateDoc } from "firebase/firestore";
+import { onSnapshot, orderBy, query, updateDoc } from "firebase/firestore";
 import { useSearchParams } from "react-router-dom";
 import { PanelRightOpen, PanelRightClose, ArrowLeft, Bot, UserRound } from "lucide-react";
-import { db } from "../firebase.js";
+import { leadsCollection, leadDoc, propertiesCollection, opportunitiesCollection } from "../lib/agencyPath.js";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import ConversationList, { needsReply } from "../components/ConversationList.jsx";
 import ConversationThread from "../components/ConversationThread.jsx";
 import CustomerPanel from "../components/CustomerPanel.jsx";
@@ -21,6 +22,7 @@ function isHumanMode(lead) {
 }
 
 export default function ChatCRM() {
+  const { agencyId } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [leads, setLeads] = useState([]);
   const [properties, setProperties] = useState({});
@@ -39,7 +41,12 @@ export default function ChatCRM() {
   }
 
   useEffect(() => {
-    const q = query(collection(db, "leads"), orderBy("lastMessageAt", "desc"));
+    if (!agencyId) {
+      setLeads([]);
+      setLoadingLeads(true);
+      return undefined;
+    }
+    const q = query(leadsCollection(agencyId), orderBy("lastMessageAt", "desc"));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -51,26 +58,30 @@ export default function ChatCRM() {
       () => setLoadingLeads(false)
     );
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, "properties"), (snapshot) => {
+    if (!agencyId) {
+      setProperties({});
+      return undefined;
+    }
+    const unsubscribe = onSnapshot(propertiesCollection(agencyId), (snapshot) => {
       const map = {};
       snapshot.docs.forEach((d) => (map[d.id] = { id: d.id, ...d.data() }));
       setProperties(map);
     });
     return unsubscribe;
-  }, []);
+  }, [agencyId]);
 
   // Opportunities belong to the customer (leads/{phone}/opportunities), not
   // to the conversation view — loading them here keeps the WhatsApp thread
   // above untouched while the CRM-only panel gets multi-opportunity data.
   useEffect(() => {
-    if (!selectedId) {
+    if (!agencyId || !selectedId) {
       setOpportunities([]);
-      return;
+      return undefined;
     }
-    const q = query(collection(db, "leads", selectedId, "opportunities"));
+    const q = query(opportunitiesCollection(agencyId, selectedId));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -80,7 +91,7 @@ export default function ChatCRM() {
       () => setOpportunities([])
     );
     return unsubscribe;
-  }, [selectedId]);
+  }, [agencyId, selectedId]);
 
   const filteredLeads = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -108,8 +119,8 @@ export default function ChatCRM() {
   }, [opportunities, selectedOpportunityId, selectedLead]);
 
   function setMode(nextMode) {
-    if (!selectedLead) return;
-    updateDoc(doc(db, "leads", selectedLead.id), { mode: nextMode }).catch((err) =>
+    if (!selectedLead || !agencyId) return;
+    updateDoc(leadDoc(agencyId, selectedLead.id), { mode: nextMode }).catch((err) =>
       console.error("Failed to update lead mode", err)
     );
   }

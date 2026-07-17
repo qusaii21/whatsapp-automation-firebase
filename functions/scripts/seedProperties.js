@@ -2,9 +2,10 @@
 /**
  * One-time database seed script.
  *
- *   npm run seed-properties               # adds ~50 properties
- *   npm run seed-properties -- --count=80 # custom count
- *   npm run seed-properties -- --reset    # deletes existing seeded docs first
+ *   npm run seed-properties                       # adds ~50 properties to the "default" agency
+ *   npm run seed-properties -- --count=80         # custom count
+ *   npm run seed-properties -- --reset             # deletes existing seeded docs first
+ *   npm run seed-properties -- --agency=agencyId  # seed a specific agency (defaults to "default")
  *
  * Run from inside functions/ (it uses the same firebase-admin dependency
  * already installed there — no separate package.json needed).
@@ -19,11 +20,17 @@
  */
 const admin = require("firebase-admin");
 const { generateProperties } = require("./propertyData");
+// MULTI-TENANCY: properties now live under agencies/{agencyId}/properties
+// (see ../src/tenancy.js) — this script needs to know which agency it's
+// seeding, same as every Cloud Function that touches this collection.
+const { agencyCollection } = require("../src/tenancy");
 
 const args = process.argv.slice(2);
 const countArg = args.find((a) => a.startsWith("--count="));
 const count = countArg ? parseInt(countArg.split("=")[1], 10) : 50;
 const shouldReset = args.includes("--reset");
+const agencyArg = args.find((a) => a.startsWith("--agency="));
+const agencyId = agencyArg ? agencyArg.split("=")[1] : "default";
 
 // Marks every doc this script writes so --reset only ever touches seeded
 // data, never anything a real user/agent created through the app.
@@ -36,10 +43,11 @@ async function main() {
   const db = admin.firestore();
 
   console.log(`Project: ${process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId || "(from ADC)"}`);
+  console.log(`Agency:  ${agencyId}`);
 
   if (shouldReset) {
     console.log("Deleting previously seeded properties...");
-    const existing = await db.collection("properties").where("_seedTag", "==", SEED_TAG).get();
+    const existing = await agencyCollection(db, agencyId, "properties").where("_seedTag", "==", SEED_TAG).get();
     if (!existing.empty) {
       const batches = chunk(existing.docs, 400);
       for (const batchDocs of batches) {
@@ -62,7 +70,7 @@ async function main() {
   for (const batchProps of batches) {
     const batch = db.batch();
     for (const prop of batchProps) {
-      const ref = db.collection("properties").doc();
+      const ref = agencyCollection(db, agencyId, "properties").doc();
       batch.set(ref, prop);
     }
     await batch.commit();

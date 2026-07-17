@@ -5,6 +5,7 @@ const logger = require("firebase-functions/logger");
 const { GRAPH_API_VERSION } = require("./config");
 const { CampaignError } = require("./campaigns");
 const { recordTemplateCreated, recordTemplateStatusChange, recordTemplateSyncBatch } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * WHATSAPP TEMPLATE MANAGEMENT
@@ -93,8 +94,8 @@ class TemplateError extends Error {
 
 // ── Normalisers ───────────────────────────────────────────────────────────
 
-function templatesCollection(db) {
-  return db.collection("whatsappTemplates");
+function templatesCollection(db, agencyId) {
+  return agencyCollection(db, agencyId, "whatsappTemplates");
 }
 
 function normalizeCategory(raw) {
@@ -289,7 +290,7 @@ async function fetchTemplateFromMeta({ templateId, whatsappToken }) {
  * Full catalog sync — same semantics as before but now captures
  * quality_score, rejected_reason, and parameter_format.
  */
-async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
+async function syncTemplatesFromMeta(db, agencyId, { wabaId, whatsappToken }) {
   if (!wabaId || typeof wabaId !== "string") {
     throw new TemplateError("A WhatsApp Business Account ID is required.", "invalid_argument");
   }
@@ -309,7 +310,7 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
     throw new TemplateError("Failed to fetch templates from the WhatsApp Cloud API.", "upstream_error");
   }
 
-  const col = templatesCollection(db);
+  const col = templatesCollection(db, agencyId);
   const fetchedIds = new Set(fetched.map((t) => t.id));
 
   let added = 0;
@@ -396,7 +397,7 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
 
   // METRICS: one accumulated increment write for the entire sync, however
   // many templates it touched — see bumpMetric/recordTemplateSyncBatch above.
-  await recordTemplateSyncBatch(db, metricsDeltas);
+  await recordTemplateSyncBatch(db, agencyId, metricsDeltas);
 
   const durationMs = Date.now() - startedAt;
   const result = { added, updated, disabled, durationMs, totalFetched: fetched.length };
@@ -408,7 +409,7 @@ async function syncTemplatesFromMeta(db, { wabaId, whatsappToken }) {
  * Refresh a single template by its Meta template ID and upsert into Firestore.
  * Preserves CRM-only fields (variableMappings) via merge: true.
  */
-async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
+async function refreshSingleTemplate(db, agencyId, { templateId, whatsappToken }) {
   if (!templateId) throw new TemplateError("templateId is required.", "invalid_argument");
   if (!whatsappToken) throw new TemplateError("whatsappToken is required.", "invalid_argument");
 
@@ -426,7 +427,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
     throw new TemplateError("Failed to fetch template from Meta.", "upstream_error");
   }
 
-  const col = templatesCollection(db);
+  const col = templatesCollection(db, agencyId);
   const ref = col.doc(templateId);
   const snap = await ref.get();
   const normalized = normalizeTemplateFromMeta(meta);
@@ -447,7 +448,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
       },
       { merge: true }
     );
-    await recordTemplateStatusChange(db, previousStatus, safeNormalized.status);
+    await recordTemplateStatusChange(db, agencyId, previousStatus, safeNormalized.status);
   } else {
     await ref.set({
       ...safeNormalized,
@@ -456,7 +457,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       lastSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    await recordTemplateCreated(db, safeNormalized.status);
+    await recordTemplateCreated(db, agencyId, safeNormalized.status);
   }
 
   return safeNormalized;
@@ -476,7 +477,7 @@ async function refreshSingleTemplate(db, { templateId, whatsappToken }) {
  * @param {object} [opts.variableMappings] - CRM-only label map to store
  * @returns {Promise<{templateId: string, name: string, status: string}>}
  */
-async function createTemplateOnMeta(db, { wabaId, whatsappToken, payload, variableMappings }) {
+async function createTemplateOnMeta(db, agencyId, { wabaId, whatsappToken, payload, variableMappings }) {
   if (!wabaId) throw new TemplateError("wabaId is required.", "invalid_argument");
   if (!whatsappToken) throw new TemplateError("whatsappToken is required.", "invalid_argument");
   if (!payload?.name) throw new TemplateError("Template name is required.", "invalid_argument");
@@ -544,7 +545,7 @@ async function createTemplateOnMeta(db, { wabaId, whatsappToken, payload, variab
   }
 
   const normalized = normalizeTemplateFromMeta(fullTemplate);
-  const col = templatesCollection(db);
+  const col = templatesCollection(db, agencyId);
 
   // Build the Firestore document carefully.
   // Components are sanitized by normalizeTemplateFromMeta (all `example` keys
@@ -585,7 +586,7 @@ async function createTemplateOnMeta(db, { wabaId, whatsappToken, payload, variab
   // METRICS: this function only ever runs once per createTemplate HTTP call
   // (a fresh doc.set() above, never a merge onto an existing template), so
   // this is a one-time event.
-  await recordTemplateCreated(db, normalized.status);
+  await recordTemplateCreated(db, agencyId, normalized.status);
 
   return {
     templateId: newTemplateId,
@@ -598,9 +599,9 @@ async function createTemplateOnMeta(db, { wabaId, whatsappToken, payload, variab
  * Fetch a single template from Firestore by Meta template ID (not doc ID;
  * they are the same, but this makes intent explicit).
  */
-async function getTemplateDetails(db, { templateId }) {
+async function getTemplateDetails(db, agencyId, { templateId }) {
   if (!templateId) throw new TemplateError("templateId is required.", "invalid_argument");
-  const snap = await templatesCollection(db).doc(templateId).get();
+  const snap = await templatesCollection(db, agencyId).doc(templateId).get();
   if (!snap.exists) throw new TemplateError(`Template ${templateId} not found.`, "not_found");
   return { id: snap.id, ...snap.data() };
 }
@@ -608,8 +609,8 @@ async function getTemplateDetails(db, { templateId }) {
 /**
  * Campaign creation guard — unchanged semantics.
  */
-async function assertTemplateApprovedForCampaign(db, { templateName, templateLanguage }) {
-  const snap = await templatesCollection(db)
+async function assertTemplateApprovedForCampaign(db, agencyId, { templateName, templateLanguage }) {
+  const snap = await templatesCollection(db, agencyId)
     .where("name", "==", templateName)
     .where("language", "==", templateLanguage)
     .limit(1)

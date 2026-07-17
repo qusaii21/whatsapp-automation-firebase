@@ -7,6 +7,7 @@ const {
   WHATSAPP_BSP_MARKUP_MULTIPLIER,
   CREDITS_PER_USD,
 } = require("./config");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * DASHBOARD METRICS ENGINE
@@ -77,8 +78,8 @@ const {
  * already uses for its own non-critical property-image send.
  */
 
-function metricsRef(db) {
-  return db.collection("metrics").doc("dashboard");
+function metricsRef(db, agencyId) {
+  return agencyCollection(db, agencyId, "metrics").doc("dashboard");
 }
 
 /**
@@ -123,11 +124,11 @@ function isoWeekKey(date) {
   return `${d.getUTCFullYear()}-W${pad2(week)}`;
 }
 
-function periodRefs(db, date = new Date()) {
+function periodRefs(db, agencyId, date = new Date()) {
   return {
-    daily: db.collection("metricsDaily").doc(dayKey(date)),
-    weekly: db.collection("metricsWeekly").doc(isoWeekKey(date)),
-    monthly: db.collection("metricsMonthly").doc(monthKey(date)),
+    daily: agencyCollection(db, agencyId, "metricsDaily").doc(dayKey(date)),
+    weekly: agencyCollection(db, agencyId, "metricsWeekly").doc(isoWeekKey(date)),
+    monthly: agencyCollection(db, agencyId, "metricsMonthly").doc(monthKey(date)),
   };
 }
 
@@ -158,18 +159,18 @@ function buildPatch(deltas) {
  * both single, non-retried writes). Best-effort: logs and swallows any
  * error rather than throwing, per the file header's FAILURE ISOLATION note.
  */
-async function applyMetrics(db, deltas) {
+async function applyMetrics(db, agencyId, deltas) {
   try {
     const patch = buildPatch(deltas);
-    const { daily, weekly, monthly } = periodRefs(db);
+    const { daily, weekly, monthly } = periodRefs(db, agencyId);
     const batch = db.batch();
-    batch.set(metricsRef(db), patch, { merge: true });
+    batch.set(metricsRef(db, agencyId), patch, { merge: true });
     batch.set(daily, patch, { merge: true });
     batch.set(weekly, patch, { merge: true });
     batch.set(monthly, patch, { merge: true });
     await batch.commit();
   } catch (err) {
-    logger.error("metrics: update failed", { deltas, error: err.message });
+    logger.error("metrics: update failed", { agencyId, deltas, error: err.message });
   }
 }
 
@@ -185,10 +186,10 @@ async function applyMetrics(db, deltas) {
  * failure surfaces as the transaction's own failure/retry, exactly like
  * every other tx.set in that same transaction).
  */
-function applyMetricsInTransaction(tx, db, deltas) {
+function applyMetricsInTransaction(tx, db, agencyId, deltas) {
   const patch = buildPatch(deltas);
-  const { daily, weekly, monthly } = periodRefs(db);
-  tx.set(metricsRef(db), patch, { merge: true });
+  const { daily, weekly, monthly } = periodRefs(db, agencyId);
+  tx.set(metricsRef(db, agencyId), patch, { merge: true });
   tx.set(daily, patch, { merge: true });
   tx.set(weekly, patch, { merge: true });
   tx.set(monthly, patch, { merge: true });
@@ -226,18 +227,18 @@ function whatsappSendCostUsd(category) {
 // metrics-implementation detail (which path, which transaction) inline.
 
 /** New `leads/{phone}` doc created (leadsWebhook.js, brand-new lead only). */
-function recordLeadCreated(db) {
-  return applyMetrics(db, { "leads.total": 1 });
+function recordLeadCreated(db, agencyId) {
+  return applyMetrics(db, agencyId, { "leads.total": 1 });
 }
 
 /** New `leads/{phone}/opportunities/{id}` doc created (opportunities.js). */
-function recordOpportunityCreated(db) {
-  return applyMetrics(db, { "opportunities.total": 1 });
+function recordOpportunityCreated(db, agencyId) {
+  return applyMetrics(db, agencyId, { "opportunities.total": 1 });
 }
 
 /** New campaign created in `draft` status (campaigns.js's createCampaign). */
-function recordCampaignCreated(db) {
-  return applyMetrics(db, {
+function recordCampaignCreated(db, agencyId) {
+  return applyMetrics(db, agencyId, {
     "campaigns.total": 1,
     "campaigns.byStatus.draft": 1,
   });
@@ -250,28 +251,28 @@ function recordCampaignCreated(db) {
  * CAMPAIGN_STATUS_TRANSITIONS before writing, so this is always a legal,
  * single, exactly-once move). Call from inside that same transaction.
  */
-function recordCampaignStatusChangeInTx(tx, db, previousStatus, newStatus) {
+function recordCampaignStatusChangeInTx(tx, db, agencyId, previousStatus, newStatus) {
   if (!newStatus || previousStatus === newStatus) return;
   const deltas = {};
   if (previousStatus) deltas[`campaigns.byStatus.${previousStatus}`] = -1;
   deltas[`campaigns.byStatus.${newStatus}`] = 1;
-  applyMetricsInTransaction(tx, db, deltas);
+  applyMetricsInTransaction(tx, db, agencyId, deltas);
 }
 
 /** New `whatsappTemplates/{id}` doc created via createTemplate endpoint. */
-function recordTemplateCreated(db, status) {
+function recordTemplateCreated(db, agencyId, status) {
   const deltas = { "templates.total": 1 };
   if (status) deltas[`templates.byStatus.${status}`] = 1;
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /** A single template's status changed (refreshTemplate.js's single-template refresh). */
-function recordTemplateStatusChange(db, previousStatus, newStatus) {
+function recordTemplateStatusChange(db, agencyId, previousStatus, newStatus) {
   if (!newStatus || previousStatus === newStatus) return Promise.resolve();
   const deltas = {};
   if (previousStatus) deltas[`templates.byStatus.${previousStatus}`] = -1;
   deltas[`templates.byStatus.${newStatus}`] = 1;
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /**
@@ -282,9 +283,9 @@ function recordTemplateStatusChange(db, previousStatus, newStatus) {
  * applied as a SINGLE increment write at the end. This is what keeps a
  * 200-template sync at one extra Firestore write, not 200.
  */
-function recordTemplateSyncBatch(db, deltas) {
+function recordTemplateSyncBatch(db, agencyId, deltas) {
   if (!deltas || Object.keys(deltas).length === 0) return Promise.resolve();
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /**
@@ -296,7 +297,7 @@ function recordTemplateSyncBatch(db, deltas) {
  * cost, which is booked by recordLlmUsage below at the point runAgent
  * returns, not here at send time.
  */
-function recordAIMessageSent(db) {
+function recordAIMessageSent(db, agencyId) {
   const { metaCost, whatsappCost } = whatsappSendCostUsd("service");
   const deltas = {
     "messages.ai.total": 1,
@@ -305,7 +306,7 @@ function recordAIMessageSent(db) {
     "costs.whatsappUsd": whatsappCost,
     "credits.used": whatsappCost * CREDITS_PER_USD,
   };
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /**
@@ -313,7 +314,7 @@ function recordAIMessageSent(db) {
  * toward both the human-specific total and the overall WhatsApp send total.
  * Booked as a "service" category send — same rationale as recordAIMessageSent.
  */
-function recordHumanMessageSent(db) {
+function recordHumanMessageSent(db, agencyId) {
   const { metaCost, whatsappCost } = whatsappSendCostUsd("service");
   const deltas = {
     "messages.human.total": 1,
@@ -322,7 +323,7 @@ function recordHumanMessageSent(db) {
     "costs.whatsappUsd": whatsappCost,
     "credits.used": whatsappCost * CREDITS_PER_USD,
   };
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /**
@@ -340,7 +341,7 @@ function recordHumanMessageSent(db) {
  *   existing customer-service window rather than opening a billable
  *   template conversation. See config.js's META_WHATSAPP_RATE_USD.
  */
-function recordWhatsAppSystemSend(db, category = "service") {
+function recordWhatsAppSystemSend(db, agencyId, category = "service") {
   const { metaCost, whatsappCost } = whatsappSendCostUsd(category);
   const deltas = {
     "messages.whatsapp.sent": 1,
@@ -348,7 +349,7 @@ function recordWhatsAppSystemSend(db, category = "service") {
     "costs.whatsappUsd": whatsappCost,
     "credits.used": whatsappCost * CREDITS_PER_USD,
   };
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 /**
@@ -362,9 +363,9 @@ function recordWhatsAppSystemSend(db, category = "service") {
  *   a flat guess. Defaults to "marketing" since that's the overwhelmingly
  *   common case for a bulk campaign send.
  */
-function recordWhatsAppSentInTx(tx, db, category = "marketing") {
+function recordWhatsAppSentInTx(tx, db, agencyId, category = "marketing") {
   const { metaCost, whatsappCost } = whatsappSendCostUsd(category);
-  applyMetricsInTransaction(tx, db, {
+  applyMetricsInTransaction(tx, db, agencyId, {
     "messages.whatsapp.sent": 1,
     "costs.metaUsd": metaCost,
     "costs.whatsappUsd": whatsappCost,
@@ -373,8 +374,8 @@ function recordWhatsAppSentInTx(tx, db, category = "marketing") {
 }
 
 /** A campaign recipient's send permanently failed (processCampaignRecipient.js's finalizeFailure, in-tx). */
-function recordWhatsAppFailedInTx(tx, db) {
-  applyMetricsInTransaction(tx, db, { "messages.whatsapp.failed": 1 });
+function recordWhatsAppFailedInTx(tx, db, agencyId) {
+  applyMetricsInTransaction(tx, db, agencyId, { "messages.whatsapp.failed": 1 });
 }
 
 // "sent" is deliberately excluded here — it's recorded once, at send time,
@@ -385,9 +386,9 @@ function recordWhatsAppFailedInTx(tx, db) {
 const TRACKED_WHATSAPP_STATUSES = ["delivered", "read", "failed"];
 
 /** A campaign recipient's status advanced via Meta's status webhook (campaigns.js's applyRecipientStatusUpdate, in-tx). */
-function recordWhatsAppStatusInTx(tx, db, status) {
+function recordWhatsAppStatusInTx(tx, db, agencyId, status) {
   if (!TRACKED_WHATSAPP_STATUSES.includes(status)) return;
-  applyMetricsInTransaction(tx, db, { [`messages.whatsapp.${status}`]: 1 });
+  applyMetricsInTransaction(tx, db, agencyId, { [`messages.whatsapp.${status}`]: 1 });
 }
 
 /**
@@ -405,7 +406,7 @@ function recordWhatsAppStatusInTx(tx, db, status) {
  * `_meta.llmUsage`), so a turn with several Groq calls is still just ONE
  * metrics write here, not one per call.
  */
-function recordLlmUsage(db, usages) {
+function recordLlmUsage(db, agencyId, usages) {
   if (!Array.isArray(usages) || usages.length === 0) return Promise.resolve();
 
   const deltas = {};
@@ -441,7 +442,7 @@ function recordLlmUsage(db, usages) {
   }
 
   if (Object.keys(deltas).length === 0) return Promise.resolve();
-  return applyMetrics(db, deltas);
+  return applyMetrics(db, agencyId, deltas);
 }
 
 module.exports = {

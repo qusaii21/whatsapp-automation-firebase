@@ -2,14 +2,11 @@ const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 
-const {
-  WHATSAPP_TOKEN,
-  WHATSAPP_PHONE_NUMBER_ID,
-  WHATSAPP_FOLLOWUP_TEMPLATE,
-  FOLLOWUP_CLAIM_STALE_MS,
-} = require("./config");
+const { WHATSAPP_CRED_ENC_KEY, FOLLOWUP_CLAIM_STALE_MS } = require("./config");
 const { sendWhatsAppTemplate } = require("./whatsapp");
 const { recordWhatsAppSystemSend } = require("./metrics");
+const { agencyCollection, agencySettingsRef } = require("./tenancy");
+const { loadWhatsAppCredentials, WhatsAppNotConnectedError } = require("./whatsappCredentials");
 
 /**
  * Called exactly once, 24 hours after a lead was created, by the Cloud Task
@@ -22,20 +19,20 @@ const { recordWhatsAppSystemSend } = require("./metrics");
  */
 const followupCheck = onRequest(
   {
-    secrets: [WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_FOLLOWUP_TEMPLATE],
+    secrets: [WHATSAPP_CRED_ENC_KEY],
     region: "us-central1",
     invoker: "private",
   },
   async (req, res) => {
     try {
-      const { phone } = req.body || {};
-      if (!phone) {
-        res.status(400).send("Missing phone in task payload");
+      const { phone, agencyId } = req.body || {};
+      if (!phone || !agencyId) {
+        res.status(400).send("Missing phone/agencyId in task payload");
         return;
       }
 
       const db = admin.firestore();
-      const leadRef = db.collection("leads").doc(phone);
+      const leadRef = agencyCollection(db, agencyId, "leads").doc(phone);
       const snap = await leadRef.get();
 
       if (!snap.exists) {
@@ -47,6 +44,34 @@ const followupCheck = onRequest(
       const lead = snap.data();
 
       if (lead.status === "pending" || lead.status === "sending_followup") {
+        // Resolve this agency's connection + its own approved follow-up
+        // template BEFORE claiming the lead — a claim that can't actually
+        // be fulfilled (no WhatsApp connection, or no follow-up template
+        // configured) should never flip status away from "pending", or the
+        // lead would be stuck with no automatic retry path.
+        let creds;
+        try {
+          creds = await loadWhatsAppCredentials(db, agencyId);
+        } catch (err) {
+          if (err instanceof WhatsAppNotConnectedError) {
+            logger.warn("followupCheck: agency has no connected WhatsApp account, skipping", { agencyId, phone });
+            res.sendStatus(200);
+            return;
+          }
+          throw err;
+        }
+
+        const settingsSnap = await agencySettingsRef(db, agencyId).get();
+        const followupTemplateName = settingsSnap.exists ? settingsSnap.data()?.followupTemplateName : null;
+        if (!followupTemplateName) {
+          logger.warn("followupCheck: no follow-up template configured for agency, skipping", {
+            agencyId,
+            phone,
+          });
+          res.sendStatus(200);
+          return;
+        }
+
         // Same at-least-once-delivery hazard as processIncomingMessage: if
         // this function times out or crashes AFTER sendWhatsAppTemplate()
         // succeeds but BEFORE the status update commits, Cloud Tasks will
@@ -93,14 +118,14 @@ const followupCheck = onRequest(
 
         await sendWhatsAppTemplate({
           to: phone,
-          templateName: WHATSAPP_FOLLOWUP_TEMPLATE.value(),
-          whatsappToken: WHATSAPP_TOKEN.value(),
-          phoneNumberId: WHATSAPP_PHONE_NUMBER_ID.value(),
+          templateName: followupTemplateName,
+          whatsappToken: creds.whatsappToken,
+          phoneNumberId: creds.phoneNumberId,
         });
         // METRICS: only reached after winning the "sending_followup" claim
         // transaction above, which is what makes this exactly-once across
         // Cloud Tasks redeliveries — see that transaction's own comment.
-        await recordWhatsAppSystemSend(db, "utility");
+        await recordWhatsAppSystemSend(db, agencyId, "utility");
 
         await leadRef.update({ status: "followed_up" });
         logger.info("followupCheck: sent follow-up", { phone });

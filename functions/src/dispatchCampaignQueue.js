@@ -33,9 +33,9 @@ const dispatchCampaignQueue = onRequest(
     timeoutSeconds: CAMPAIGN_DISPATCH_TIMEOUT_SECONDS,
   },
   async (req, res) => {
-    const { campaignId } = req.body || {};
-    if (!campaignId || typeof campaignId !== "string") {
-      res.status(400).send("Missing or invalid 'campaignId' in task payload");
+    const { campaignId, agencyId } = req.body || {};
+    if (!campaignId || typeof campaignId !== "string" || !agencyId || typeof agencyId !== "string") {
+      res.status(400).send("Missing or invalid 'campaignId'/'agencyId' in task payload");
       return;
     }
 
@@ -43,7 +43,7 @@ const dispatchCampaignQueue = onRequest(
     const projectId = process.env.GCLOUD_PROJECT;
 
     try {
-      const result = await runDispatch(db, campaignId, projectId);
+      const result = await runDispatch(db, agencyId, campaignId, projectId);
       logger.info("dispatchCampaignQueue: run complete", { campaignId, ...result });
       res.status(200).json(result);
     } catch (err) {

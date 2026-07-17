@@ -4,6 +4,7 @@ const logger = require("firebase-functions/logger");
 const { normalizePropertyType, normalizeListingType, normalizePurpose } = require("./searchNormalization");
 const { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES } = require("./propertyEnums");
 const { recordOpportunityCreated } = require("./metrics");
+const { agencyCollection } = require("./tenancy");
 
 /**
  * CUSTOMER -> OPPORTUNITIES MODEL
@@ -37,8 +38,8 @@ const { recordOpportunityCreated } = require("./metrics");
  * see hydratePropertiesShared, which handles both shapes transparently.
  */
 
-function opportunitiesCollection(db, phone) {
-  return db.collection("leads").doc(phone).collection("opportunities");
+function opportunitiesCollection(db, agencyId, phone) {
+  return agencyCollection(db, agencyId, "leads").doc(phone).collection("opportunities");
 }
 
 // Converts one legacy full-object shownProperties/propertiesShared entry (or
@@ -71,7 +72,7 @@ function toLightweightPropertyRef(p) {
  * @returns {Promise<object[]>} Full records, each with an `id` field. Entries whose
  *   referenced property no longer exists are dropped.
  */
-async function hydratePropertiesShared(db, propertiesShared) {
+async function hydratePropertiesShared(db, agencyId, propertiesShared) {
   const entries = propertiesShared || [];
   // Legacy entries already carry the full property object inline (under
   // `id`) — nothing to fetch.
@@ -83,7 +84,7 @@ async function hydratePropertiesShared(db, propertiesShared) {
     return legacy;
   }
 
-  const refs = lightweight.map((p) => db.collection("properties").doc(p.propertyId));
+  const refs = lightweight.map((p) => agencyCollection(db, agencyId, "properties").doc(p.propertyId));
   const snaps = await db.getAll(...refs);
   const hydrated = snaps
     .map((snap, i) => {
@@ -239,6 +240,7 @@ function propertyCategory(canonicalType) {
  */
 async function resolveActiveOpportunity({
   db,
+  agencyId,
   phone,
   activeOpportunityId,
   activeSnap,
@@ -248,7 +250,7 @@ async function resolveActiveOpportunity({
   agentPurpose,
   incomingMessageText,
 }) {
-  const oppCol = opportunitiesCollection(db, phone);
+  const oppCol = opportunitiesCollection(db, agencyId, phone);
   const noActiveOpportunity = !activeSnap || !activeSnap.exists;
 
   let shouldCreateNew = noActiveOpportunity;
@@ -310,7 +312,7 @@ async function resolveActiveOpportunity({
     // caller (processPhoneQueue.js) only calls resolveActiveOpportunity when
     // `!cached?.opportunityId`, then immediately caches the result on
     // msgRef — see that file's own comment on this.
-    await recordOpportunityCreated(db);
+    await recordOpportunityCreated(db, agencyId);
     return {
       ref: newRef,
       id: newRef.id,

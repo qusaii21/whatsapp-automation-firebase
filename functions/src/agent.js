@@ -19,6 +19,7 @@ const {
   normalizePossessionStatus,
 } = require("./searchNormalization");
 const { UsageAccumulator } = require("./llmUsage");
+const { agencyCollection } = require("./tenancy");
 
 const AGENT_MODEL = "llama-3.3-70b-versatile";
 
@@ -102,7 +103,7 @@ const FILTERABLE_AMENITIES = [
   "modularKitchen",
 ];
 
-function buildSearchPropertiesTool(excludeIds) {
+function buildSearchPropertiesTool(excludeIds, agencyId) {
   return tool(
     async ({
       bedrooms,
@@ -120,7 +121,7 @@ function buildSearchPropertiesTool(excludeIds) {
       // properties collection is small (tens to low hundreds of docs), which
       // is far cheaper than maintaining a composite index per filter
       // combination.
-      let query = db.collection("properties").where("available", "==", true);
+      let query = agencyCollection(db, agencyId, "properties").where("available", "==", true);
       if (bedrooms !== undefined && bedrooms !== null) {
         query = query.where("bedrooms", ">=", bedrooms);
       }
@@ -338,6 +339,7 @@ function historyToMessages(conversationHistory) {
  *   opportunity doc is made deterministically in opportunities.js, not here.
  */
 async function runAgent({
+  agencyId,
   leadName,
   conversationHistory,
   shownPropertyIds = [],
@@ -448,7 +450,7 @@ async function runAgent({
   let responseMessages = messages;
 
   if (searchAllowed) {
-    const searchPropertiesTool = buildSearchPropertiesTool(shownPropertyIds);
+    const searchPropertiesTool = buildSearchPropertiesTool(shownPropertyIds, agencyId);
     const llmWithTools = llm.bindTools([searchPropertiesTool]);
 
     const firstResponse = await llmWithTools.invoke(messages);
